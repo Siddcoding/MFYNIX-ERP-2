@@ -1,0 +1,36 @@
+{
+  // Terminal > Run Task...  (or Ctrl/Cmd+Shift+P -> "Run Task")
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Install dependencies",
+      "type": "shell",
+      "command": "npm install",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Start ERP",
+      "type": "shell",
+      "command": "npm start",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Reset database (deletes all data)",
+      "type": "shell",
+      "command": "node -e \"require('fs').readdirSync('db').filter(f=>f.startsWith('mfintech.db')).forEach(f=>{require('fs').unlinkSync('db/'+f);console.log('deleted db/'+f)})\"",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run API tests",
+      "type": "shell",
+      "command": "bash run-tests.sh",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

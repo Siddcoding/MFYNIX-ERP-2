@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Settings - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('admin');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Settings</h2>
+    <p class="muted">Company profile, financial years, document numbering, appearance, transaction controls and the audit trail.</p>
+    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;" id="tabBar"></div>
+  </div>
+  <div id="tabContent"></div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+
+  const AUDIT_ROLES = ['Super Admin', 'Company Admin', 'Auditor'];
+  if (!AUDIT_ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to Settings.</p></div>';
+    return;
+  }
+  const isSuperAdmin = user.role === 'Super Admin';
+  const canEditCompany = ['Super Admin', 'Company Admin'].includes(user.role);
+
+  // Appearance is a personal preference, so everyone who can open Settings
+  // gets it. The rest is administration.
+  const TABS = ['Company', 'Financial Years', 'Numbering', 'Companies', 'Messaging', 'Backup', 'Appearance', 'Policies', 'Audit Log']
+    .filter(t => {
+      if (['Policies', 'Companies', 'Backup'].includes(t)) return isSuperAdmin;
+      if (t === 'Messaging') return canEditCompany;
+      if (['Company', 'Financial Years', 'Numbering'].includes(t)) return canEditCompany || user.role === 'Auditor';
+      return true;
+    });
+  let activeTab = TABS[0];
+  buildTabBar(document.getElementById('tabBar'), TABS, activeTab, (t) => { activeTab = t; render(); });
+
+
+  async function render() {
+    const target = document.getElementById('tabContent');
+    target.innerHTML = '<div class="card"><p class="muted">Loading…</p></div>';
+    try {
+      if (activeTab === 'Company') await renderCompany(target);
+      else if (activeTab === 'Financial Years') await renderYears(target);
+      else if (activeTab === 'Numbering') await renderNumbering(target);
+      else if (activeTab === 'Companies') await renderCompanies(target);
+      else if (activeTab === 'Messaging') await renderMessaging(target);
+      else if (activeTab === 'Backup') await renderBackup(target);
+      else if (activeTab === 'Appearance') renderAppearance(target);
+      else if (activeTab === 'Policies') await renderPolicies(target);
+      else await renderAudit(target);
+      attachHoverEffects();
+    } catch (e) {
+      target.innerHTML = `<div class="card"><p class="error-text">${esc(e.message)}</p></div>`;
+      toast(e.message, 'error');
+    }
+  }
+
+  // ---------------- Company Master ----------------
+  async function renderCompany(target) {
+    const c = await api('/admin/company');
+    const ro = canEditCompany ? '' : 'disabled';
+    target.innerHTML = `
+      <div class="card">
+        <h2>Company profile</h2>
+        <p class="muted">These details appear on every printed invoice and drive the default invoice prefix.</p>
+        <form id="companyForm">
+          <div class="form-grid">
+            <div><label>Company name *</label><input name="companyName" value="${esc(c.CompanyName)}" required ${ro} /></div>
+            <div><label>GSTIN</label><input name="gstin" value="${esc(c.GSTIN)}" ${ro} /></div>
+            <div><label>PAN</label><input name="pan" value="${esc(c.PAN)}" ${ro} /></div>
+            <div><label>CIN</label><input name="cin" value="${esc(c.CIN)}" ${ro} /></div>
+            <div><label>State</label><input name="state" value="${esc(c.State)}" ${ro} /></div>
+            <div><label>Country</label><input name="country" value="${esc(c.Country || 'India')}" ${ro} /></div>
+            <div><label>Phone</label><input name="phone" value="${esc(c.Phone)}" ${ro} /></div>
+            <div><label>Email</label><input name="email" type="email" value="${esc(c.Email)}" ${ro} /></div>
+            <div><label>Website</label><input name="website" value="${esc(c.Website)}" ${ro} /></div>
+            <div><label>Invoice prefix</label><input name="invoicePrefix" value="${esc(c.InvoicePrefix || 'INV')}" ${ro} /></div>
+          </div>
+          <label style="margin-top:10px;display:block;">Registered address</label>
+          <textarea name="address" rows="2" ${ro}>${esc(c.Address)}</textarea>
+
+          <h3 style="margin:20px 0 8px;font-size:0.95rem;">Bank details</h3>
+          <div class="form-grid">
+            <div><label>Bank name</label><input name="bankName" value="${esc(c.BankName)}" ${ro} /></div>
+            <div><label>Account number</label><input name="bankAccountNo" value="${esc(c.BankAccountNo)}" ${ro} /></div>
+            <div><label>IFSC</label><input name="bankIFSC" value="${esc(c.BankIFSC)}" ${ro} /></div>
+            <div><label>Bank branch</label><input name="bankBranch" value="${esc(c.BankBranch)}" ${ro} /></div>
+          </div>
+
+          <label style="margin-top:14px;display:block;">Declaration printed on invoices</label>
+          <textarea name="declarationText" rows="2" placeholder="e.g. We declare that this invoice shows the actual price of the goods described." ${ro}>${esc(c.DeclarationText)}</textarea>
+
+          <h3 style="margin:20px 0 8px;font-size:0.95rem;">Logo</h3>
+          <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+            <div id="logoPreview" style="width:120px;height:64px;border:1px dashed var(--border);border-radius:8px;display:grid;place-items:center;overflow:hidden;">
+              ${c.LogoDataUrl ? `<img src="${esc(c.LogoDataUrl)}" style="max-width:100%;max-height:100%;" />` : '<span class="muted" style="font-size:0.74rem;">No logo</span>'}
+            </div>
+            ${canEditCompany ? `
+              <div>
+                <input type="file" id="logoFile" accept="image/png,image/jpeg,image/svg+xml" />
+                <p class="muted" style="font-size:0.76rem;margin:6px 0 0;">PNG, JPG or SVG under about 300 KB. It is stored in the database and printed on invoices.</p>
+                ${c.LogoDataUrl ? '<button type="button" class="btn secondary" id="removeLogo" style="margin-top:8px;padding:6px 12px;">Remove logo</button>' : ''}
+              </div>` : ''}
+          </div>
+
+          <div id="companyError" class="error-text" style="display:none;"></div>
+          ${canEditCompany ? '<button class="btn" type="submit" data-loading-text="Saving…" style="margin-top:16px;">Save company profile</button>' : '<p class="muted" style="margin-top:14px;">Your role can view this but not change it.</p>'}
+        </form>
+      </div>`;
+
+    if (!canEditCompany) return;
+
+    let pendingLogo = null;
+    const fileInput = document.getElementById('logoFile');
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files[0];
+      if (!f) return;
+      if (f.size > 300 * 1024) { toast('That image is over 300 KB — please use a smaller one.', 'error'); fileInput.value = ''; return; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        pendingLogo = reader.result;
+        document.getElementById('logoPreview').innerHTML = `<img src="${pendingLogo}" style="max-width:100%;max-height:100%;" />`;
+      };
+      reader.readAsDataURL(f);
+    });
+    const removeBtn = document.getElementById('removeLogo');
+    if (removeBtn) removeBtn.addEventListener('click', () => {
+      pendingLogo = '';
+      document.getElementById('logoPreview').innerHTML = '<span class="muted" style="font-size:0.74rem;">No logo</span>';
+    });
+
+    const form = document.getElementById('companyForm');
+    const submit = form.querySelector('button[type=submit]');
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(submit, async () => {
+        const errBox = document.getElementById('companyError');
+        errBox.style.display = 'none';
+        const body = Object.fromEntries(new FormData(form).entries());
+        if (pendingLogo !== null) body.logoDataUrl = pendingLogo;
+        try {
+          const saved = await api('/admin/company', { method: 'PUT', body });
+          toast('Company profile saved', 'success');
+          if (saved.seriesNote) toast(saved.seriesNote, 'info', 9000);
+          showSuccessBurst('Saved');
+          render();
+        } catch (err) {
+          errBox.textContent = err.message;
+          errBox.style.display = 'block';
+          toast(err.message, 'error');
+        }
+      })();
+    });
+  }
+
+  // ---------------- Financial years ----------------
+  async function renderYears(target) {
+    const years = await api('/admin/financial-years');
+    target.innerHTML = `
+      ${canEditCompany ? `
+      <div class="card">
+        <h2>Add a financial year</h2>
+        <p class="muted">The Indian financial year runs 1 April to 31 March. Years cannot overlap, because a document has to belong to exactly one of them.</p>
+        <form id="fyForm">
+          <div class="form-grid">
+            <div><label>Name *</label><input name="yearName" placeholder="e.g. 2027-28" required /></div>
+            <div><label>Start date *</label><input name="startDate" type="date" required /></div>
+            <div><label>End date *</label><input name="endDate" type="date" required /></div>
+            <div><button class="btn" type="submit" data-loading-text="Adding…">Add year</button></div>
+          </div>
+          <div id="fyError" class="error-text" style="display:none;"></div>
+        </form>
+      </div>` : ''}
+
+      <div class="card">
+        <h2>Financial years</h2>
+        ${renderTable(years.map(y => ({
+          Year: y.YearName, From: fmtDate(y.StartDate), To: fmtDate(y.EndDate),
+          Status: y.IsActive
+            ? '<span class="badge ok">Active</span>'
+            : (y.IsClosed ? '<span class="badge warn">Closed</span>' : '<span class="badge">Open</span>'),
+          Actions: canEditCompany ? [
+            !y.IsActive && !y.IsClosed ? `<button class="btn secondary" data-activate="${esc(y.FinancialYearID)}" style="padding:6px 12px;">Make active</button>` : '',
+            !y.IsActive ? `<button class="btn secondary" data-close="${esc(y.FinancialYearID)}" data-closed="${y.IsClosed ? 1 : 0}" style="padding:6px 12px;">${y.IsClosed ? 'Reopen' : 'Close'}</button>` : '',
+            y.IsActive && !y.IsClosed ? `<button class="btn" data-yearend="${esc(y.FinancialYearID)}" data-name="${esc(y.YearName)}" style="padding:6px 12px;">Year-end close</button>` : '',
+            y.IsClosed ? `<button class="btn secondary" data-openings="${esc(y.FinancialYearID)}" style="padding:6px 12px;">Openings</button>` : ''
+          ].filter(Boolean).join(' ') : '—'
+        })), [
+          { key: 'Year', label: 'Year' }, { key: 'From', label: 'From' }, { key: 'To', label: 'To' },
+          { key: 'Status', label: 'Status', render: r => r.Status },
+          { key: 'Actions', label: '', render: r => r.Actions }
+        ], 'No financial years yet.')}
+        <p class="muted" style="margin-top:12px;">
+          A closed year rejects new sales and purchase postings dated inside it. <strong>Year-end close</strong> does the full job:
+          it posts the closing entry that zeroes every income and expense account into Retained Earnings, carries the
+          balance-sheet balances into the next year as opening balances, locks the year, and makes the next one active.
+          Create the following year first — there has to be somewhere for the balances to go.
+        </p>
+      </div>`;
+
+    const form = document.getElementById('fyForm');
+    if (form) {
+      const submit = form.querySelector('button[type=submit]');
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        withLoading(submit, async () => {
+          const errBox = document.getElementById('fyError');
+          errBox.style.display = 'none';
+          try {
+            await api('/admin/financial-years', { method: 'POST', body: Object.fromEntries(new FormData(form).entries()) });
+            toast('Financial year added', 'success');
+            render();
+          } catch (err) { errBox.textContent = err.message; errBox.style.display = 'block'; }
+        })();
+      });
+    }
+
+    target.querySelectorAll('[data-activate]').forEach(b => b.addEventListener('click', withLoading(b, async () => {
+      try {
+        const r = await api(`/admin/financial-years/${b.dataset.activate}/activate`, { method: 'POST', body: {} });
+        toast(`${r.active} is now the active year`, 'success');
+        render();
+      } catch (e) { toast(e.message, 'error'); }
+    })));
+    target.querySelectorAll('[data-yearend]').forEach(b => b.addEventListener('click', () => {
+      const modal = openModal(`Year-end close — ${esc(b.dataset.name)}`, `
+        <p class="muted">This posts the closing entry, carries balances into the next year and locks ${esc(b.dataset.name)}.
+          Reopening afterwards is possible, but the closing entry stays in the books, so only do this when the year is
+          genuinely finished.</p>
+        <div id="yeError" class="error-text" style="display:none;"></div>
+        <div style="display:flex;gap:8px;margin-top:16px;">
+          <button class="btn" id="yeGo" data-loading-text="Closing…">Close the year</button>
+          <button class="btn secondary" id="yeCancel">Not yet</button>
+        </div>`);
+      modal.querySelector('#yeCancel').addEventListener('click', closeModal);
+      const go = modal.querySelector('#yeGo');
+      go.addEventListener('click', withLoading(go, async () => {
+        const errBox = modal.querySelector('#yeError');
+        errBox.style.display = 'none';
+        try {
+          const r = await api(`/admin/financial-years/${b.dataset.yearend}/close-with-carryforward`, { method: 'POST', body: {} });
+          closeModal();
+          toast(`${r.closed} closed. Net ${r.netProfit >= 0 ? 'profit' : 'loss'} ${fmtMoney(Math.abs(r.netProfit))} carried into ${r.carriedInto}.`, 'success', 9000);
+          showSuccessBurst('Year closed');
+          render();
+        } catch (e) { errBox.textContent = e.message; errBox.style.display = 'block'; }
+      }));
+    }));
+
+    target.querySelectorAll('[data-openings]').forEach(b => b.addEventListener('click', async () => {
+      try {
+        const d = await api(`/admin/financial-years/${b.dataset.openings}/opening-balances`);
+        openModal('Opening balances carried in', `
+          ${renderTable(d.rows.map(r => ({
+            Branch: r.BranchName, Code: r.AccountCode, Account: r.AccountName, Type: r.AccountType,
+            Debit: r.Debit ? fmtMoney(r.Debit) : '', Credit: r.Credit ? fmtMoney(r.Credit) : ''
+          })), [
+            { key: 'Branch', label: 'Branch' }, { key: 'Code', label: 'Code' }, { key: 'Account', label: 'Account' },
+            { key: 'Type', label: 'Type' },
+            { key: 'Debit', label: 'Debit', align: 'right' }, { key: 'Credit', label: 'Credit', align: 'right' }
+          ], 'No opening balances recorded for this year.')}
+          <p style="margin-top:12px;"><strong>Dr ${fmtMoney(d.totalDebit)} · Cr ${fmtMoney(d.totalCredit)}</strong>
+            ${d.balanced ? '<span class="badge ok">Balanced</span>' : '<span class="badge warn">Not balanced</span>'}</p>
+          <button class="btn secondary" onclick="closeModal()" style="margin-top:12px;">Close</button>`);
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+
+    target.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', withLoading(b, async () => {
+      try {
+        await api(`/admin/financial-years/${b.dataset.close}/close`, { method: 'POST', body: { closed: b.dataset.closed !== '1' } });
+        toast(b.dataset.closed === '1' ? 'Year reopened' : 'Year closed', 'success');
+        render();
+      } catch (e) { toast(e.message, 'error'); }
+    })));
+  }
+
+  // ---------------- Document numbering ----------------
+  async function renderNumbering(target) {
+    const d = await api('/admin/numbering');
+    target.innerHTML = `
+      <div class="card">
+        <h2>Document numbering</h2>
+        <p class="muted">
+          One engine issues every document number, so two people saving at the same moment can never be given the same one.
+          The format is <strong>PREFIX-YEAR-NUMBER</strong>, for example <code>HYD/INV-${esc(d.activeYear || '2026-27')}-000001</code>.
+          Each branch keeps its own unbroken series.
+        </p>
+        ${d.activeYear ? '' : '<p class="error-text">No active financial year — set one on the Financial Years tab before raising documents.</p>'}
+        ${renderTable(d.sequences.map(s => ({
+          Type: s.DocType, Branch: s.BranchName ? `${esc(s.BranchName)} (${esc(s.BranchCode)})` : 'Company-wide',
+          Year: s.FinancialYear, Prefix: s.Prefix, Padding: s.Padding,
+          'Next number': s.preview,
+          Actions: canEditCompany ? `<button class="btn secondary" data-edit="${esc(s.SequenceID)}" data-prefix="${esc(s.Prefix)}" data-padding="${esc(s.Padding)}" data-next="${esc(s.NextNumber)}" style="padding:6px 12px;">Edit</button>` : '—'
+        })), [
+          { key: 'Type', label: 'Document' }, { key: 'Branch', label: 'Branch' }, { key: 'Year', label: 'Year' },
+          { key: 'Prefix', label: 'Prefix' }, { key: 'Padding', label: 'Digits', align: 'right' },
+          { key: 'Next number', label: 'Next number' },
+          { key: 'Actions', label: '', render: r => r.Actions }
+        ], 'No series have been used yet. One is created automatically the first time a document of that type is saved.')}
+        <p class="muted" style="margin-top:12px;">The counter can only be moved forward. Moving it back would reissue numbers that are already on saved documents.</p>
+      </div>`;
+
+    target.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+      const modal = openModal('Edit numbering series', `
+        <div class="form-grid">
+          <div><label>Prefix</label><input id="nPrefix" value="${esc(b.dataset.prefix)}" /></div>
+          <div><label>Digits</label><input id="nPadding" type="number" min="1" max="10" value="${b.dataset.padding}" /></div>
+          <div><label>Next number</label><input id="nNext" type="number" min="${b.dataset.next}" value="${b.dataset.next}" /></div>
+        </div>
+        <div id="nError" class="error-text" style="display:none;"></div>
+        <div style="display:flex;gap:8px;margin-top:16px;">
+          <button class="btn" id="nSave" data-loading-text="Saving…">Save</button>
+          <button class="btn secondary" id="nCancel">Cancel</button>
+        </div>`);
+      modal.querySelector('#nCancel').addEventListener('click', closeModal);
+      const save = modal.querySelector('#nSave');
+      save.addEventListener('click', withLoading(save, async () => {
+        const errBox = modal.querySelector('#nError');
+        errBox.style.display = 'none';
+        try {
+          await api(`/admin/numbering/${b.dataset.edit}`, { method: 'PUT', body: {
+            prefix: modal.querySelector('#nPrefix').value,
+            padding: Number(modal.querySelector('#nPadding').value),
+            nextNumber: Number(modal.querySelector('#nNext').value)
+          } });
+          closeModal();
+          toast('Numbering updated', 'success');
+          render();
+        } catch (e) { errBox.textContent = e.message; errBox.style.display = 'block'; }
+      }));
+    }));
+  }
+
+  // ---------------- Companies (multi-company) ----------------
+  async function renderCompanies(target) {
+    const companies = await api('/admin/companies');
+    target.innerHTML = `
+      <div class="card">
+        <h2>Add a company</h2>
+        <p class="muted">A new company is created complete: its head-office branch, chart of accounts, financial year,
+          settings and an administrator who can sign in. Each company's data is entirely separate.</p>
+        <form id="coForm">
+          <div class="form-grid">
+            <div><label>Company name *</label><input name="companyName" required /></div>
+            <div><label>GSTIN</label><input name="gstin" /></div>
+            <div><label>State</label><input name="state" /></div>
+            <div><label>Head office branch *</label><input name="branchName" placeholder="e.g. Mumbai Head Office" required /></div>
+            <div><label>Branch code *</label><input name="branchCode" placeholder="e.g. MUM" required /></div>
+            <div><label>Admin username *</label><input name="adminUserName" required /></div>
+            <div><label>Admin full name</label><input name="adminFullName" /></div>
+            <div><label>Admin password *</label><input name="adminPassword" type="password" placeholder="At least 8 characters" required /></div>
+          </div>
+          <div id="coError" class="error-text" style="display:none;"></div>
+          <button class="btn" type="submit" data-loading-text="Creating…" style="margin-top:14px;">Create company</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Companies</h2>
+        ${renderTable(companies.map(c => ({
+          Company: c.CompanyName, GSTIN: c.GSTIN || '—',
+          Branches: c.Branches, Users: c.Users,
+          Status: c.IsActive ? '<span class="badge ok">Active</span>' : '<span class="badge warn">Inactive</span>'
+        })), [
+          { key: 'Company', label: 'Company' }, { key: 'GSTIN', label: 'GSTIN' },
+          { key: 'Branches', label: 'Branches', align: 'right' }, { key: 'Users', label: 'Users', align: 'right' },
+          { key: 'Status', label: 'Status', render: r => r.Status }
+        ], 'No companies.')}
+        <p class="muted" style="margin-top:12px;">To work in another company, sign in as one of its users — a session belongs to one company, which is what keeps the data separate.</p>
+      </div>`;
+
+    const form = document.getElementById('coForm');
+    const submit = form.querySelector('button[type=submit]');
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(submit, async () => {
+        const errBox = document.getElementById('coError');
+        errBox.style.display = 'none';
+        try {
+          const body = Object.fromEntries(new FormData(form).entries());
+          await api('/admin/companies', { method: 'POST', body });
+          toast(`${esc(body.companyName)} created — sign in as ${body.adminUserName} to work in it`, 'success', 8000);
+          showSuccessBurst('Company created');
+          form.reset();
+          render();
+        } catch (err) { errBox.textContent = err.message; errBox.style.display = 'block'; }
+      })();
+    });
+  }
+
+  // ---------------- Backup ----------------
+  async function renderBackup(target) {
+    const [info, list] = await Promise.all([api('/admin/backup/info'), api('/admin/backups')]);
+    const mb = info.sizeBytes ? (info.sizeBytes / 1048576).toFixed(2) : '?';
+    target.innerHTML = `
+      <div class="card">
+        <h2>Backups</h2>
+        <p class="muted">
+          A verified backup is taken automatically every night and kept for 14 days. Each one is a consistent snapshot
+          taken while people work, then opened and checked (integrity check plus a read of the key tables) before it
+          counts as good. Recovery is to the time of the last backup, not to an arbitrary second.
+        </p>
+        <p><b>Last automatic backup:</b> ${esc(list.lastScheduled || 'none yet')}</p>
+        ${renderTable([
+          { Item: 'Database size', Value: `${mb} MB` },
+          { Item: 'Last written', Value: info.modified ? new Date(info.modified).toLocaleString('en-IN') : '—' },
+          ...Object.entries(info.counts).map(([k, v]) => ({ Item: k, Value: v + ' rows' }))
+        ], [{ key: 'Item', label: 'Item' }, { key: 'Value', label: 'Value', align: 'right' }])}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;">
+          <button class="btn" id="runBackupBtn" data-loading-text="Backing up…">Back up and verify now</button>
+          <button class="btn secondary" id="backupBtn" data-loading-text="Preparing…">Download a fresh copy</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Backup history</h2>
+        <p class="muted">Run a restore test at least every quarter: it restores a chosen backup into a scratch file and reads it back, without touching live data.</p>
+        ${renderTable(list.rows.map(r => ({
+          When: new Date(r.CreatedAt.replace(' ', 'T') + 'Z').toLocaleString('en-IN'),
+          Kind: r.Trigger,
+          File: r.FileName,
+          Size: r.SizeBytes ? (r.SizeBytes / 1048576).toFixed(2) + ' MB' : '—',
+          Result: `<span class="badge ${r.Verified ? 'ok' : 'warn'}">${r.Verified ? 'Verified' : 'Failed'}</span> <span class="muted">${esc(r.Detail || '')}</span>`,
+          Actions: r.Trigger !== 'restore-test' && r.exists
+            ? `<button class="btn secondary" data-restore="${esc(r.BackupID)}" style="padding:4px 10px;">Test restore</button>
+               <button class="btn secondary" data-dl="${esc(r.BackupID)}" data-fn="${esc(r.FileName)}" style="padding:4px 10px;">Download</button>` : ''
+        })), [
+          { key: 'When', label: 'When' }, { key: 'Kind', label: 'Kind' }, { key: 'File', label: 'File' },
+          { key: 'Size', label: 'Size', align: 'right' },
+          { key: 'Result', label: 'Result', render: (r) => r.Result },
+          { key: 'Actions', label: '', render: (r) => r.Actions }
+        ], 'No backups yet.')}
+        <h3 style="margin:20px 0 8px;font-size:0.95rem;">Restoring</h3>
+        <p class="muted">
+          Stop the server, replace the database file (<code>mfintech.db</code> in the data folder) with the backup you
+          want, delete any <code>.db-wal</code> and <code>.db-shm</code> files next to it, then start the server again.
+        </p>
+      </div>`;
+
+    const runBtn = document.getElementById('runBackupBtn');
+    runBtn.addEventListener('click', withLoading(runBtn, async () => {
+      try {
+        const r = await api('/admin/backups', { method: 'POST' });
+        toast(r.verified ? 'Backup taken and verified' : 'Backup taken but NOT verified: ' + r.detail, r.verified ? 'success' : 'error');
+      } catch (e) { toast(e.message, 'error'); }
+      render();
+    }));
+    const btn = document.getElementById('backupBtn');
+    btn.addEventListener('click', withLoading(btn, async () => {
+      try {
+        const stamp = new Date().toISOString().slice(0, 10);
+        await apiDownload('/admin/backup', {}, `mfynix-backup-${stamp}.db`);
+        toast('Backup downloaded', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+    target.querySelectorAll('[data-restore]').forEach(b => b.addEventListener('click', async () => {
+      try {
+        const r = await api(`/admin/backups/${b.dataset.restore}/test-restore`, { method: 'POST' });
+        toast(r.ok ? 'Restore test passed: the backup opens and reads cleanly' : 'Restore test FAILED: ' + r.detail, r.ok ? 'success' : 'error', 7000);
+        render();
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+    target.querySelectorAll('[data-dl]').forEach(b => b.addEventListener('click', async () => {
+      try { await apiDownload(`/admin/backups/${b.dataset.dl}/download`, {}, b.dataset.fn); } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  // ---------------- Messaging (email / SMS / WhatsApp) ----------------
+  async function renderMessaging(target) {
+    const [providers, templates, log] = await Promise.all([
+      api('/messaging/providers'), api('/messaging/templates'), api('/messaging/log', { params: { pageSize: 15 } })
+    ]);
+    const prov = Object.fromEntries(providers.map(p => [p.channel, p]));
+    const em = prov.Email.config || {}, sms = prov.SMS.config || {}, wa = prov.WhatsApp.config || {};
+    target.innerHTML = `
+      <div class="card">
+        <h2>Providers</h2>
+        <p class="muted">Password resets, customer invitations, payment reminders and approval alerts are sent through these.
+          With no provider set, messages are recorded in the delivery log as <b>Not sent</b> instead of disappearing.</p>
+        <h3 style="font-size:0.95rem;margin:14px 0 6px;">Email (SMTP) ${prov.Email.isActive ? '<span class="badge ok">active</span>' : '<span class="badge warn">off</span>'}</h3>
+        <form id="emailForm" class="form-grid">
+          <div><label>SMTP host *</label><input name="host" value="${esc(em.host || '')}" /></div>
+          <div><label>Port</label><input name="port" type="number" value="${esc(em.port || 587)}" /></div>
+          <div><label>Username</label><input name="user" value="${esc(em.user || '')}" autocomplete="off" /></div>
+          <div><label>Password</label><input name="pass" type="password" value="${esc(em.pass || '')}" autocomplete="new-password" /></div>
+          <div><label>From address *</label><input name="from" value="${esc(em.from || '')}" placeholder="Mfynix &lt;no-reply@yourcompany.com&gt;" /></div>
+          <div><label>Use TLS (port 465)</label><select name="secure"><option value="0" ${em.secure ? '' : 'selected'}>No (STARTTLS)</option><option value="1" ${em.secure ? 'selected' : ''}>Yes</option></select></div>
+          <div><label>Enabled</label><select name="isActive"><option value="1" ${prov.Email.isActive ? 'selected' : ''}>Yes</option><option value="0" ${prov.Email.isActive ? '' : 'selected'}>No</option></select></div>
+          <div style="align-self:end;"><button class="btn" type="submit">Save email</button></div>
+        </form>
+        ${['SMS', 'WhatsApp'].map(ch => { const c = ch === 'SMS' ? sms : wa; const p = prov[ch]; return `
+        <h3 style="font-size:0.95rem;margin:18px 0 6px;">${ch} (HTTP gateway) ${p.isActive ? '<span class="badge ok">active</span>' : '<span class="badge warn">off</span>'}</h3>
+        <form class="form-grid gwForm" data-channel="${ch}">
+          <div><label>Gateway URL *</label><input name="url" value="${esc(c.url || '')}" placeholder="https://…" /></div>
+          <div><label>Authorization header</label><input name="authHeader" type="password" value="${esc(c.authHeader || '')}" autocomplete="off" placeholder="Bearer …" /></div>
+          <div style="grid-column:1/-1;"><label>JSON body template — use {{to}} and {{message}}</label>
+            <input name="bodyTemplate" value="${esc(c.bodyTemplate || '{&quot;to&quot;:&quot;{{to}}&quot;,&quot;message&quot;:&quot;{{message}}&quot;}')}" /></div>
+          <div><label>Enabled</label><select name="isActive"><option value="1" ${p.isActive ? 'selected' : ''}>Yes</option><option value="0" ${p.isActive ? '' : 'selected'}>No</option></select></div>
+          <div style="align-self:end;"><button class="btn" type="submit">Save ${ch}</button></div>
+        </form>`; }).join('')}
+        <h3 style="font-size:0.95rem;margin:18px 0 6px;">Send a test</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <select id="testChannel"><option>Email</option><option>SMS</option><option>WhatsApp</option></select>
+          <input id="testTo" placeholder="address or phone number" />
+          <button class="btn secondary" id="testBtn" data-loading-text="Sending…">Send test</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Message templates</h2>
+        <p class="muted">Placeholders such as {{name}}, {{amount}}, {{invoices}}, {{link}} are filled in when a message is sent.</p>
+        ${templates.map(t => `
+          <details style="margin:8px 0;"><summary><b>${esc(t.code)}</b> ${t.customised ? '<span class="badge ok">customised</span>' : ''}</summary>
+            <div class="form-grid" style="margin-top:8px;" data-tpl="${esc(t.code)}">
+              <div style="grid-column:1/-1;"><label>Subject</label><input class="tplSubject" value="${esc(t.subject || '')}" /></div>
+              <div style="grid-column:1/-1;"><label>Body</label><textarea class="tplBody" rows="5" style="width:100%;">${esc(t.body)}</textarea></div>
+              <div><button class="btn secondary tplSave" type="button">Save template</button></div>
+            </div></details>`).join('')}
+      </div>
+      <div class="card">
+        <h2>Delivery log</h2>
+        ${renderTable(log.rows.map(r => ({
+          When: new Date(r.CreatedAt.replace(' ', 'T') + 'Z').toLocaleString('en-IN'), Channel: r.Channel, To: r.ToAddress || '—',
+          Subject: r.Subject || '—', Status: r.Status, Detail: r.Detail || ''
+        })), [{ key: 'When', label: 'When' }, { key: 'Channel', label: 'Channel' }, { key: 'To', label: 'To' },
+              { key: 'Subject', label: 'Subject' }, { key: 'Status', label: 'Status' }, { key: 'Detail', label: 'Detail' }], 'Nothing sent yet.')}
+      </div>`;
+
+    const save = async (channel, body) => {
+      try { await api(`/messaging/providers/${channel}`, { method: 'PUT', body }); toast(`${channel} settings saved`, 'success'); render(); }
+      catch (e) { toast(e.message, 'error'); }
+    };
+    document.getElementById('emailForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target));
+      save('Email', { isActive: f.isActive === '1', name: 'SMTP', config: { host: f.host, port: Number(f.port) || 587, user: f.user, pass: f.pass, from: f.from, secure: f.secure === '1' } });
+    });
+    target.querySelectorAll('.gwForm').forEach(form => form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(form));
+      save(form.dataset.channel, { isActive: f.isActive === '1', name: 'HTTP gateway', config: { url: f.url, authHeader: f.authHeader, bodyTemplate: f.bodyTemplate } });
+    }));
+    const tb = document.getElementById('testBtn');
+    tb.addEventListener('click', withLoading(tb, async () => {
+      try {
+        const r = await api(`/messaging/providers/${document.getElementById('testChannel').value}/test`, { method: 'POST', body: { to: document.getElementById('testTo').value.trim() } });
+        toast(`Test ${r.status}${r.detail ? ': ' + r.detail : ''}`, r.status === 'Sent' ? 'success' : 'error', 7000);
+        render();
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+    target.querySelectorAll('[data-tpl]').forEach(box => box.querySelector('.tplSave').addEventListener('click', async () => {
+      try {
+        await api(`/messaging/templates/${box.dataset.tpl}`, { method: 'PUT', body: { subject: box.querySelector('.tplSubject').value, body: box.querySelector('.tplBody').value } });
+        toast('Template saved', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  // ---------------- Appearance ----------------
+  function renderAppearance(target) {
+    const current = getTheme();
+    target.innerHTML = `
+      <div class="card">
+        <h2>Appearance</h2>
+        <p class="muted">Pick a look. It applies instantly and is remembered on this device for your browser.</p>
+        <div class="theme-grid" style="margin-top:14px;">
+          ${THEMES.map(t => `
+            <div class="theme-card ${t.id === current ? 'selected' : ''}" data-theme-id="${t.id}">
+              <div class="theme-swatch" style="background:${t.id === 'daylight' ? '#eef2f7' : '#0c1116'};">
+                <i style="width:60px;height:60px;top:-14px;left:-8px;background:${t.colors[0]};"></i>
+                <i style="width:52px;height:52px;top:4px;right:6px;background:${t.colors[1]};"></i>
+                <i style="width:44px;height:44px;bottom:-16px;left:44%;background:${t.colors[2]};"></i>
+              </div>
+              <div class="theme-name">${esc(t.name)}</div>
+              <div class="theme-desc">${t.desc}</div>
+            </div>`).join('')}
+        </div>
+      </div>`;
+
+    target.querySelectorAll('[data-theme-id]').forEach(card => card.addEventListener('click', () => {
+      chooseTheme(card.dataset.themeId);
+      target.querySelectorAll('[data-theme-id]').forEach(c => c.classList.toggle('selected', c === card));
+      toast(`${THEMES.find(t => t.id === card.dataset.themeId).name} applied`, 'success');
+    }));
+  }
+
+  // ---------------- Transaction policies ----------------
+  async function renderPolicies(target) {
+    const s = await api('/admin/settings');
+    target.innerHTML = `
+      <div class="card">
+        <h2>Transaction controls</h2>
+        <p class="muted">These decide whether the system refuses a transaction that breaks a rule. Both default to the safe
+          option. Only a Super Admin can relax them, and every change is written to the audit log.</p>
+
+        <div class="setting-row">
+          <label class="switch-row">
+            <input type="checkbox" id="setNegStock" ${s.allowNegativeStock ? 'checked' : ''} />
+            <span><strong>Allow negative stock</strong></span>
+          </label>
+          <p class="muted">
+            Off (recommended): a sale or transfer is refused when the branch doesn't have the goods, and the message says
+            how much is actually on hand. Turn it on only if you genuinely invoice before stock is received — the trade-off
+            is that stock figures can then go negative and no longer reflect reality.
+          </p>
+        </div>
+
+        <div class="setting-row">
+          <label class="switch-row">
+            <input type="checkbox" id="setCredit" ${s.enforceCreditLimit ? 'checked' : ''} />
+            <span><strong>Enforce customer credit limits</strong></span>
+          </label>
+          <p class="muted">
+            On (recommended): a sale is refused if it would take the customer past the credit limit on their master record.
+            The check now uses real outstanding — invoices less receipts allocated against them — so collecting a payment
+            frees the limit up again. Customers with a limit of zero are treated as having no limit.
+          </p>
+        </div>
+
+        <button class="btn" id="saveSettings" data-loading-text="Saving…" style="margin-top:8px;">Save settings</button>
+      </div>`;
+
+    const btn = document.getElementById('saveSettings');
+    btn.addEventListener('click', withLoading(btn, async () => {
+      try {
+        await api('/admin/settings', { method: 'PUT', body: {
+          allowNegativeStock: document.getElementById('setNegStock').checked,
+          enforceCreditLimit: document.getElementById('setCredit').checked
+        } });
+        toast('Settings saved and recorded in the audit log', 'success');
+        showSuccessBurst('Saved');
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  // ---------------- Audit log ----------------
+  let auditPage = 1;
+  let actionsCache = null;
+
+  async function renderAudit(target) {
+    if (!actionsCache) actionsCache = await api('/admin/audit/actions');
+    target.innerHTML = `
+      <div class="card">
+        <div class="filter-bar">
+          <div><label>Search</label><input id="aSearch" placeholder="Details, entity or username" /></div>
+          <div><label>Action</label>
+            <select id="aAction"><option value="">All actions</option>
+              ${actionsCache.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('')}
+            </select>
+          </div>
+          <div><label>From</label><input id="aFrom" type="date" /></div>
+          <div><label>To</label><input id="aTo" type="date" /></div>
+          <div><button class="btn secondary" id="aClear">Clear</button></div>
+        </div>
+        <div id="auditRows"></div>
+        <div id="auditPager"></div>
+      </div>`;
+
+    ['aSearch', 'aAction', 'aFrom', 'aTo'].forEach(id => {
+      const node = document.getElementById(id);
+      const evt = node.tagName === 'SELECT' || node.type === 'date' ? 'change' : 'input';
+      let t;
+      node.addEventListener(evt, () => { clearTimeout(t); t = setTimeout(() => loadAudit(1), 250); });
+    });
+    document.getElementById('aClear').addEventListener('click', () => {
+      ['aSearch', 'aFrom', 'aTo'].forEach(id => document.getElementById(id).value = '');
+      document.getElementById('aAction').value = '';
+      loadAudit(1);
+    });
+    await loadAudit(auditPage);
+  }
+
+  async function loadAudit(page) {
+    auditPage = page || auditPage;
+    const rowsBox = document.getElementById('auditRows');
+    rowsBox.innerHTML = '<p class="muted">Loading…</p>';
+    const d = await api('/admin/audit', { params: {
+      page: auditPage, pageSize: 50,
+      search: document.getElementById('aSearch').value,
+      action: document.getElementById('aAction').value,
+      from: document.getElementById('aFrom').value,
+      to: document.getElementById('aTo').value
+    } });
+
+    rowsBox.innerHTML = renderTable(d.rows.map(r => ({
+      When: new Date(r.CreatedAt + 'Z').toLocaleString('en-IN'),
+      Who: r.FullName || r.UserName || 'system',
+      Action: `<span class="audit-action">${esc(r.Action)}</span>`,
+      Branch: r.BranchName || 'Head Office',
+      Entity: r.EntityType ? `${esc(r.EntityType)}${r.EntityID ? ' #' + r.EntityID : ''}` : '—',
+      Details: r.Details || '',
+      IP: r.IPAddress || ''
+    })), [
+      { key: 'When', label: 'When' }, { key: 'Who', label: 'Who' },
+      { key: 'Action', label: 'Action', render: r => r.Action },
+      { key: 'Branch', label: 'Branch' }, { key: 'Entity', label: 'Entity' },
+      { key: 'Details', label: 'Details' }, { key: 'IP', label: 'IP' }
+    ], 'No audit entries match these filters.');
+
+    renderPager(document.getElementById('auditPager'), d, (n) => loadAudit(n));
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

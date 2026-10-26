@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Purchase - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('purchase');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>New Purchase Invoice</h2>
+    <form id="purchaseForm">
+      <div class="form-grid">
+        <div id="branchSelectWrap" style="display:none;">
+          <label>Branch *</label>
+          <select name="branchId" id="branchSelect"></select>
+        </div>
+        <div>
+          <label>Supplier *</label>
+          <select name="supplierId" id="supplierSelect" required></select>
+        </div>
+        <div>
+          <label>Booking Date *</label>
+          <input type="date" name="purchaseDate" id="purchaseDate" required />
+        </div>
+        <div>
+          <label>Vendor Invoice No. *</label>
+          <input name="vendorInvoiceNo" id="vendorInvoiceNo" required placeholder="As printed on the vendor's bill" />
+        </div>
+        <div>
+          <label>Vendor Invoice Date *</label>
+          <input type="date" name="vendorInvoiceDate" id="vendorInvoiceDate" required />
+        </div>
+      </div>
+      <div id="docExtrasSlot"></div>
+
+      <h3 style="margin:16px 0 8px;font-size:0.9rem;">Line Items</h3>
+      <div id="lineItems"></div>
+      <button type="button" class="btn secondary" id="addLineBtn" style="margin-top:8px;">+ Add Item</button>
+
+      <div style="margin-top:16px;font-weight:600;">Net Amount: <span id="netAmountPreview">₹0</span></div>
+      <div id="purchaseError" class="error-text" style="display:none;"></div>
+      <button class="btn" type="submit" style="margin-top:14px;">Save Purchase</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Recent Purchases</h2>
+    <div class="filter-bar">
+      <div><label>Search</label><input id="fSearch" placeholder="Bill no or supplier" /></div>
+      <div><label>From</label><input id="fFrom" type="date" /></div>
+      <div><label>To</label><input id="fTo" type="date" /></div>
+      <div><label>Status</label><select id="fStatus"><option value="">All</option><option>Posted</option><option>Cancelled</option></select></div>
+      <div><button class="btn secondary" id="fClear">Clear</button></div>
+    </div>
+    <div id="purchaseList"></div>
+    <div id="purchasePager"></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+
+  // The statutory reference/transport block, shared by every document type.
+  document.getElementById('docExtrasSlot').innerHTML = documentExtrasHtml();
+  initDocumentExtras();
+  const user = Auth.getUser();
+  const canCancel = !['Read Only', 'Auditor'].includes(user.role);
+  document.getElementById('purchaseDate').valueAsDate = new Date();
+  document.getElementById('vendorInvoiceDate').valueAsDate = new Date();
+
+  let items = [];
+
+  async function loadRefData() {
+    items = await api('/masters/items');
+    const suppliers = await api('/masters/suppliers');
+
+    document.getElementById('supplierSelect').innerHTML =
+      suppliers.map(s => `<option value="${esc(s.SupplierID)}">${esc(s.SupplierName)}</option>`).join('') ||
+      '<option value="">No suppliers - add one under Masters</option>';
+
+    if (!user.branchId) {
+      const branches = await api('/branches');
+      document.getElementById('branchSelectWrap').style.display = 'block';
+      document.getElementById('branchSelect').innerHTML =
+        branches.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('');
+    }
+  }
+
+  function itemOptions() {
+    return items.map(i => `<option value="${esc(i.ItemID)}" data-rate="${esc(i.PurchaseRate)}" data-gst="${esc(i.GSTRate)}">${esc(i.ItemName)}</option>`).join('');
+  }
+
+  function addLine() {
+    const row = el(`
+      <div class="form-grid line-row" style="margin-bottom:8px;align-items:end;">
+        <div><label>Item</label><select class="li-item">${itemOptions()}</select></div>
+        <div><label>Qty</label><input class="li-qty" type="number" step="0.01" value="1" /></div>
+        <div><label>Rate</label><input class="li-rate" type="number" step="0.01" value="0" /></div>
+        <div><label>GST %</label><input class="li-gst" type="number" step="0.01" value="0" /></div>
+        <div><button type="button" class="btn secondary remove-line">Remove</button></div>
+      </div>
+    `);
+    document.getElementById('lineItems').appendChild(row);
+
+    const itemSelect = row.querySelector('.li-item');
+    const rateInput = row.querySelector('.li-rate');
+    const gstInput = row.querySelector('.li-gst');
+    function syncFromItem() {
+      const opt = itemSelect.selectedOptions[0];
+      if (opt) { rateInput.value = opt.dataset.rate || 0; gstInput.value = opt.dataset.gst || 0; }
+      recalcTotal();
+    }
+    itemSelect.addEventListener('change', syncFromItem);
+    row.querySelectorAll('input').forEach(inp => inp.addEventListener('input', recalcTotal));
+    row.querySelector('.remove-line').addEventListener('click', () => { row.remove(); recalcTotal(); });
+    syncFromItem();
+  }
+
+  function recalcTotal() {
+    let net = 0;
+    document.querySelectorAll('.line-row').forEach(row => {
+      const qty = Number(row.querySelector('.li-qty').value || 0);
+      const rate = Number(row.querySelector('.li-rate').value || 0);
+      const gst = Number(row.querySelector('.li-gst').value || 0);
+      const base = qty * rate;
+      net += base + base * (gst / 100);
+    });
+    document.getElementById('netAmountPreview').textContent = fmtMoney(net);
+  }
+
+  function collectLines() {
+    return [...document.querySelectorAll('.line-row')].map(row => ({
+      itemId: Number(row.querySelector('.li-item').value),
+      qty: Number(row.querySelector('.li-qty').value),
+      rate: Number(row.querySelector('.li-rate').value),
+      gst: Number(row.querySelector('.li-gst').value)
+    })).filter(l => l.itemId && l.qty > 0);
+  }
+
+  document.getElementById('addLineBtn').addEventListener('click', addLine);
+
+  document.getElementById('purchaseForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errBox = document.getElementById('purchaseError');
+    errBox.style.display = 'none';
+    const fd = new FormData(e.target);
+    const body = {
+      supplierId: Number(fd.get('supplierId')),
+      purchaseDate: fd.get('purchaseDate'),
+      vendorInvoiceNo: fd.get('vendorInvoiceNo'),
+      vendorInvoiceDate: fd.get('vendorInvoiceDate'),
+      ...collectDocumentExtras(e.target),
+      branchId: fd.get('branchId') ? Number(fd.get('branchId')) : undefined,
+      items: collectLines()
+    };
+    if (body.items.length === 0) {
+      errBox.textContent = 'Add at least one valid line item.';
+      errBox.style.display = 'block';
+      toast('Add at least one valid line item.', 'error');
+      return;
+    }
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalLabel = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `<span class="spinner"></span>Saving...`;
+    try {
+      const result = await api('/purchase', { method: 'POST', body });
+      showSuccessBurst(`Purchase ${esc(result.purchaseNo)} saved`);
+      toast(`Purchase ${esc(result.purchaseNo)} saved — net amount ${fmtMoney(result.netAmount)}`, 'success');
+      document.getElementById('lineItems').innerHTML = '';
+      addLine();
+      recalcTotal();
+      await loadPurchases();
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.style.display = 'block';
+      toast(err.message, 'error');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalLabel;
+    }
+  });
+
+  let purchasePage = 1;
+
+  async function loadPurchases(page) {
+    if (page) purchasePage = page;
+    const branchId = document.getElementById('branchSelect')?.value;
+    const result = await api('/purchase', { params: {
+      branchId, page: purchasePage,
+      search: document.getElementById('fSearch').value,
+      from: document.getElementById('fFrom').value,
+      to: document.getElementById('fTo').value,
+      status: document.getElementById('fStatus').value
+    } });
+    const rows = rowsOf(result);
+    const target = document.getElementById('purchaseList');
+    renderPager(document.getElementById('purchasePager'), result, (n) => loadPurchases(n));
+    if (rows.length === 0) { target.innerHTML = '<p class="muted">No purchase bills match these filters.</p>'; return; }
+    target.innerHTML = `
+      <div style="overflow-x:auto;">
+      <table>
+        <thead><tr><th>Purchase No</th><th>Branch</th><th>Supplier</th><th>Date</th><th style="text-align:right;">Net Amount</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr${r.Status === 'Cancelled' ? ' style="opacity:0.55;"' : ''}>
+            <td>${esc(r.PurchaseNo)}</td><td>${esc(r.BranchName)}</td><td>${esc(r.SupplierName)}</td>
+            <td>${fmtDate(r.PurchaseDate)}</td><td style="text-align:right;">${fmtMoney(r.NetAmount)}</td>
+            <td>${r.Status === 'Cancelled' ? '<span class="badge warn">Cancelled</span>' : '<span class="badge ok">Posted</span>'}</td>
+            <td style="white-space:nowrap;">
+              <button class="btn secondary" data-print="${esc(r.PurchaseID)}" style="padding:6px 12px;">Print</button>
+              ${r.Status !== 'Cancelled' && canCancel ? `<button class="btn secondary" data-cancel="${esc(r.PurchaseID)}" data-no="${esc(r.PurchaseNo)}" style="padding:6px 12px;">Cancel</button>` : ''}
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>`;
+
+    target.querySelectorAll('[data-print]').forEach(b =>
+      b.addEventListener('click', () => window.open(`/print.html?type=purchase&id=${b.dataset.print}`, '_blank')));
+    target.querySelectorAll('[data-cancel]').forEach(b =>
+      b.addEventListener('click', () => promptCancel(b.dataset.cancel, b.dataset.no)));
+  }
+
+  function promptCancel(purchaseId, purchaseNo) {
+    const modal = openModal(`Cancel purchase ${purchaseNo}`, `
+      <p class="muted">The bill is not deleted — its stock movement and accounting entry are reversed with matching
+      opposite entries. If any of the purchased goods have already been sold or transferred out, the cancellation is
+      refused rather than pushing the branch into negative stock.</p>
+      <label>Reason *</label>
+      <input id="cancelReason" placeholder="e.g. Duplicate entry of supplier bill" />
+      <div id="cancelError" class="error-text" style="display:none;"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn" id="cancelConfirm" data-loading-text="Cancelling…">Cancel this bill</button>
+        <button class="btn secondary" id="cancelDismiss">Keep it</button>
+      </div>`);
+    modal.querySelector('#cancelDismiss').addEventListener('click', closeModal);
+    const go = modal.querySelector('#cancelConfirm');
+    go.addEventListener('click', withLoading(go, async () => {
+      const errBox = modal.querySelector('#cancelError');
+      errBox.style.display = 'none';
+      try {
+        await api(`/purchase/${purchaseId}/cancel`, { method: 'POST', body: { reason: modal.querySelector('#cancelReason').value } });
+        closeModal();
+        toast(`Purchase ${purchaseNo} cancelled and reversed`, 'success');
+        await loadPurchases();
+      } catch (e) {
+        errBox.textContent = e.message;
+        errBox.style.display = 'block';
+      }
+    }));
+  }
+
+  ['fSearch', 'fFrom', 'fTo', 'fStatus'].forEach(id => {
+    const node = document.getElementById(id);
+    const evt = node.tagName === 'SELECT' || node.type === 'date' ? 'change' : 'input';
+    let t;
+    node.addEventListener(evt, () => { clearTimeout(t); t = setTimeout(() => loadPurchases(1), 250); });
+  });
+  document.getElementById('fClear').addEventListener('click', () => {
+    ['fSearch', 'fFrom', 'fTo'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('fStatus').value = '';
+    loadPurchases(1);
+  });
+
+  await loadRefData();
+  addLine();
+  await loadPurchases();
+  attachHoverEffects();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GST Filing - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('gst');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>GST Filing</h2>
+    <p class="muted">Returns are recomputed live from your sales and purchase invoices every time you open this page, so they can never drift from the books.</p>
+    <div class="form-grid" style="margin-top:14px;">
+      <div><label>Period</label><input type="month" id="periodInput" /></div>
+      <div id="branchFilterWrap"></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;" id="tabBar"></div>
+  </div>
+  <div id="tabContent"></div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const GST_ROLES = ['Super Admin', 'Company Admin', 'Accountant', 'Auditor'];
+  if (!GST_ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to GST Filing.</p></div>';
+    return;
+  }
+  const canFile = user.role !== 'Auditor';
+
+  const periodInput = document.getElementById('periodInput');
+  periodInput.value = currentPeriod();
+  periodInput.addEventListener('change', render);
+
+  await buildBranchFilter(document.getElementById('branchFilterWrap'), render);
+
+  const TABS = ['GSTR-3B', 'GSTR-1', 'HSN Summary', 'Branch Summary', 'Filing Log'];
+  let activeTab = 'GSTR-3B';
+  buildTabBar(document.getElementById('tabBar'), TABS, activeTab, (t) => { activeTab = t; render(); });
+
+  function period() { return periodInput.value; }
+  function scope() { return { period: period(), branchId: selectedBranch() }; }
+
+  async function render() {
+    const target = document.getElementById('tabContent');
+    target.innerHTML = '<div class="card"><p class="muted">Loading…</p></div>';
+    if (!period()) { target.innerHTML = '<div class="card"><p class="muted">Choose a period first.</p></div>'; return; }
+    try {
+      if (activeTab === 'GSTR-3B') await renderGstr3b(target);
+      else if (activeTab === 'GSTR-1') await renderGstr1(target);
+      else if (activeTab === 'HSN Summary') await renderHsn(target);
+      else if (activeTab === 'Branch Summary') await renderBranchSummary(target);
+      else if (activeTab === 'Filing Log') await renderFilingLog(target);
+      attachHoverEffects();
+    } catch (e) {
+      target.innerHTML = `<div class="card"><p class="error-text">${esc(e.message)}</p></div>`;
+      toast(e.message, 'error');
+    }
+  }
+
+  // ---------------- GSTR-3B ----------------
+  async function renderGstr3b(target) {
+    const d = await api('/gst/gstr3b', { params: scope() });
+    const L = d.liability;
+
+    target.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="label">Outward Taxable</div><div class="value" data-count="${d.outwardSupplies.taxableValue}"></div><div class="sub">${d.outwardSupplies.invoiceCount} sales invoices</div></div>
+        <div class="kpi-card"><div class="label">Output Tax</div><div class="value" data-count="${d.outwardSupplies.cgst + d.outwardSupplies.sgst + d.outwardSupplies.igst}"></div><div class="sub">collected on sales</div></div>
+        <div class="kpi-card"><div class="label">Input Credit</div><div class="value" data-count="${d.inwardSupplies.cgst + d.inwardSupplies.sgst + d.inwardSupplies.igst}"></div><div class="sub">${d.inwardSupplies.invoiceCount} purchase bills</div></div>
+        <div class="kpi-card"><div class="label">Net Payable in Cash</div><div class="value" data-count="${d.netPayable}"></div><div class="sub">${d.totalCarryForward > 0 ? fmtMoney(d.totalCarryForward) + ' credit carries forward' : 'after ITC set-off'}</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Tax liability after input credit set-off</h2>
+        <p class="muted">Credit heads are applied in the order the CGST Act requires: IGST credit is used up first (against IGST, then CGST, then SGST); CGST and SGST credit then cover their own head, and any balance goes against IGST. CGST credit can never offset SGST or the reverse.</p>
+        ${renderTable(
+          [['CGST', L.cgst], ['SGST', L.sgst], ['IGST', L.igst]].map(([name, h]) => ({
+            Head: name, 'Output tax': fmtMoney(h.output), 'Input credit': fmtMoney(h.input),
+            'Credit used': fmtMoney(h.creditUtilised), 'Payable in cash': fmtMoney(h.payable),
+            'Credit carried forward': fmtMoney(h.carryForward)
+          })),
+          [{ key: 'Head', label: 'Tax head' }, { key: 'Output tax', label: 'Output tax', align: 'right' },
+           { key: 'Input credit', label: 'Input credit', align: 'right' }, { key: 'Credit used', label: 'Credit used', align: 'right' },
+           { key: 'Payable in cash', label: 'Payable in cash', align: 'right' }, { key: 'Credit carried forward', label: 'Carried forward', align: 'right' }]
+        )}
+        <p style="margin-top:14px;font-size:18px;">
+          <strong>Net payable: ${fmtMoney(d.netPayable)}</strong>
+          ${d.totalCarryForward > 0 ? `<span class="muted"> &nbsp;·&nbsp; ${fmtMoney(d.totalCarryForward)} of unused credit carries forward</span>` : ''}
+        </p>
+        ${canFile ? `<button class="btn" id="logReturnBtn" data-loading-text="Recording…" style="margin-top:12px;">Record this GSTR-3B in the filing log</button>` : ''}
+      </div>
+
+      <div class="card">
+        <h2>Supply summary</h2>
+        ${renderTable([
+          { Section: '3.1(a) Outward taxable supplies', Taxable: fmtMoney(d.outwardSupplies.taxableValue), CGST: fmtMoney(d.outwardSupplies.cgst), SGST: fmtMoney(d.outwardSupplies.sgst), IGST: fmtMoney(d.outwardSupplies.igst) },
+          { Section: '4(A) Inward supplies (ITC available)', Taxable: fmtMoney(d.inwardSupplies.taxableValue), CGST: fmtMoney(d.inwardSupplies.cgst), SGST: fmtMoney(d.inwardSupplies.sgst), IGST: fmtMoney(d.inwardSupplies.igst) }
+        ])}
+      </div>`;
+
+    animateKpis(target);
+
+    const btn = document.getElementById('logReturnBtn');
+    if (btn) btn.addEventListener('click', withLoading(btn, async () => {
+      try {
+        const r = await api('/gst/returns', { method: 'POST', body: { returnType: 'GSTR3B', period: period(), branchId: selectedBranch() } });
+        toast(r.updated ? 'Filing log updated with the latest figures' : 'GSTR-3B recorded in the filing log', 'success');
+        showSuccessBurst('Recorded');
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  // ---------------- GSTR-1 ----------------
+  async function renderGstr1(target) {
+    const d = await api('/gst/gstr1', { params: scope() });
+    target.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="label">Taxable Value</div><div class="value" data-count="${d.totals.taxableValue}"></div><div class="sub">${d.totals.invoiceCount} invoices</div></div>
+        <div class="kpi-card"><div class="label">CGST</div><div class="value" data-count="${d.totals.cgst}"></div><div class="sub">intra-state</div></div>
+        <div class="kpi-card"><div class="label">SGST</div><div class="value" data-count="${d.totals.sgst}"></div><div class="sub">intra-state</div></div>
+        <div class="kpi-card"><div class="label">IGST</div><div class="value" data-count="${d.totals.igst}"></div><div class="sub">inter-state</div></div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+          <h2 style="margin:0;">B2B invoices (Table 4)</h2>
+          <div style="display:flex;gap:8px;">
+            <button class="btn secondary" id="csvBtn">Export CSV</button>
+            <button class="btn secondary" id="jsonBtn">Export portal JSON</button>
+          </div>
+        </div>
+        <p class="muted">Customers with a GSTIN. Each invoice is reported individually, as the portal requires.</p>
+        ${renderTable(d.b2b.map(r => ({
+          GSTIN: r.gstin, Customer: r.customerName, Invoice: r.invoiceNo, Date: fmtDate(r.invoiceDate),
+          'Place of supply': r.placeOfSupply, Rate: r.rate + '%', Taxable: fmtMoney(r.taxableValue),
+          CGST: fmtMoney(r.cgst), SGST: fmtMoney(r.sgst), IGST: fmtMoney(r.igst), Branch: r.branch
+        })), null, 'No B2B invoices in this period.')}
+      </div>
+
+      <div class="card">
+        <h2>B2C summary (Table 7)</h2>
+        <p class="muted">Customers without a GSTIN, consolidated by place of supply and rate.</p>
+        ${renderTable(d.b2cs.map(r => ({
+          'Place of supply': r.placeOfSupply, Rate: r.rate + '%', Invoices: r.invoiceCount,
+          Taxable: fmtMoney(r.taxableValue), CGST: fmtMoney(r.cgst), SGST: fmtMoney(r.sgst), IGST: fmtMoney(r.igst)
+        })), null, 'No B2C invoices in this period.')}
+      </div>`;
+
+    animateKpis(target);
+    document.getElementById('csvBtn').addEventListener('click', () => download('csv'));
+    document.getElementById('jsonBtn').addEventListener('click', () => download('json'));
+  }
+
+  async function download(kind) {
+    try {
+      await apiDownload(`/gst/export/gstr1.${kind}`, scope(), `GSTR1-${period()}.${kind}`);
+      toast(`GSTR-1 ${kind.toUpperCase()} downloaded`, 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ---------------- HSN summary ----------------
+  async function renderHsn(target) {
+    const rows = await api('/gst/hsn-summary', { params: scope() });
+    target.innerHTML = `
+      <div class="card">
+        <h2>HSN-wise summary (Table 12)</h2>
+        <p class="muted">Items without an HSN code are grouped as "NOT SET" - those need fixing in Masters before you file.</p>
+        ${renderTable(rows.map(r => ({
+          HSN: r.hsn, Item: r.itemName, Unit: r.unit, Qty: r.qty,
+          'Taxable value': fmtMoney(r.taxableValue), Tax: fmtMoney(r.taxAmount)
+        })), null, 'Nothing was sold in this period.')}
+      </div>`;
+  }
+
+  // ---------------- Branch summary ----------------
+  async function renderBranchSummary(target) {
+    const d = await api('/gst/branch-summary', { params: { period: period() } });
+    target.innerHTML = `
+      <div class="card">
+        <h2>Branch-wise GST position — ${d.period}</h2>
+        <p class="muted">Each branch registered in a different state files its own return under its own GSTIN. This is the head-office view of all of them.</p>
+        ${renderTable(d.branches.map(b => ({
+          Branch: `${esc(b.branchName)} (${esc(b.branchCode)})`, State: b.state || '—', GSTIN: b.gstin || '— not set —',
+          'Outward taxable': fmtMoney(b.outwardTaxable), 'Output tax': fmtMoney(b.outputTax),
+          'Input tax': fmtMoney(b.inputTax), 'Net payable': fmtMoney(b.netPayable),
+          Invoices: `${b.salesCount} sales / ${b.purchaseCount} purchase`
+        })), null, 'No branches to show.')}
+      </div>`;
+  }
+
+  // ---------------- Filing log ----------------
+  async function renderFilingLog(target) {
+    const rows = await api('/gst/returns');
+    target.innerHTML = `
+      <div class="card">
+        <h2>Filing log</h2>
+        <p class="muted">A record of every return prepared here. Once you file on the GST portal, record the ARN against it so the trail is complete.</p>
+        ${renderTable(rows.map(r => ({
+          Period: r.Period, Type: r.ReturnType, Branch: r.BranchName || 'Consolidated',
+          Taxable: fmtMoney(r.TaxableValue), 'Net payable': fmtMoney(r.NetPayable),
+          Status: r.Status === 'Filed'
+            ? `<span class="badge ok">Filed</span>`
+            : `<span class="badge warn">Generated</span>`,
+          ARN: r.ARN || (canFile && r.Status !== 'Filed' ? `<button class="btn secondary" data-file="${esc(r.ReturnID)}" style="padding:6px 12px;">Record ARN</button>` : '—')
+        })), [
+          { key: 'Period', label: 'Period' }, { key: 'Type', label: 'Return' }, { key: 'Branch', label: 'Branch' },
+          { key: 'Taxable', label: 'Taxable value', align: 'right' }, { key: 'Net payable', label: 'Net payable', align: 'right' },
+          { key: 'Status', label: 'Status', render: r => r.Status }, { key: 'ARN', label: 'ARN', render: r => r.ARN }
+        ], 'No returns have been generated yet. Open the GSTR-3B tab and record one.')}
+      </div>`;
+
+    target.querySelectorAll('[data-file]').forEach(btn => {
+      btn.addEventListener('click', () => promptForArn(btn.dataset.file));
+    });
+  }
+
+  function promptForArn(returnId) {
+    const modal = openModal('Record the ARN', `
+      <p class="muted">Enter the acknowledgement number the GST portal gave you after filing.</p>
+      <label>ARN</label>
+      <input id="arnInput" placeholder="e.g. AA210826123456Z" />
+      <div id="arnError" class="error-text" style="display:none;"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn" id="arnSave" data-loading-text="Saving…">Mark as filed</button>
+        <button class="btn secondary" id="arnCancel">Cancel</button>
+      </div>`);
+    modal.querySelector('#arnCancel').addEventListener('click', closeModal);
+    const save = modal.querySelector('#arnSave');
+    save.addEventListener('click', withLoading(save, async () => {
+      const errBox = modal.querySelector('#arnError');
+      errBox.style.display = 'none';
+      try {
+        await api(`/gst/returns/${returnId}/file`, { method: 'POST', body: { arn: modal.querySelector('#arnInput').value } });
+        closeModal();
+        toast('Return marked as filed', 'success');
+        showSuccessBurst('Filed');
+        render();
+      } catch (e) {
+        errBox.textContent = e.message;
+        errBox.style.display = 'block';
+      }
+    }));
+  }
+
+  function animateKpis(target) {
+    target.querySelectorAll('.kpi-card .value[data-count]').forEach(node => {
+      animateCounter(node, Number(node.dataset.count), (v) => fmtMoney(v));
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

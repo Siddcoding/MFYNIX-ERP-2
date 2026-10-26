@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Masters - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('masters');</script>
+
+<template id="tpl">
+  <div class="card">
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      <button class="btn" data-tab="customers">Customers</button>
+      <button class="btn secondary" data-tab="suppliers">Suppliers</button>
+      <button class="btn secondary" data-tab="items">Items</button>
+    </div>
+
+    <div id="formArea"></div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:18px 0;" />
+    <div class="list-toolbar">
+      <h2 id="listTitle" style="margin:0;font-size:1rem;">Existing records</h2>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <input id="searchBox" type="search" placeholder="Search by name or code…" style="min-width:220px;" />
+        <button class="btn secondary" id="importBtn">⬆ Import from Excel / CSV</button>
+      </div>
+    </div>
+    <div id="listArea"></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+
+  // Option lists. Kept as constants rather than inline so the same words are
+  // used on the form, in the import templates and on printed documents.
+  const PARTY_TYPES = ['Registered', 'Unregistered', 'Composition', 'SEZ', 'Export', 'Deemed Export'];
+  const ITEM_CATEGORIES = ['Raw Material', 'Semi-Finished', 'Finished Goods', 'Consumable', 'Spare Part', 'Service', 'Packing Material'];
+  const COSTING_METHODS = ['FIFO', 'LIFO', 'Weighted Average', 'Moving Average', 'Standard'];
+  const DISPLAY_MODES = ['Name', 'Code - Name', 'Name (City)'];
+
+  // Suppliers, loaded once, so the item form can offer a real vendor list
+  // instead of asking somebody to type an ID.
+  let suppliers = [];
+  // Branches and chart-of-accounts, for the customer form's "move branch"
+  // action and reconciliation-account dropdown.
+  let branches = [];
+  let accounts = [];
+  let paymentTerms = [];
+
+  const TABS = {
+    customers: {
+      endpoint: '/masters/customers',
+      title: 'Customer',
+      fields: [
+        ['CustomerName', 'Name', 'text', true, null, 'Identity'],
+        ['CustomerCode', 'Customer Code', 'text', false, null, 'Identity'],
+        ['SAPCode', 'SAP Code', 'text', false, null, 'Identity'],
+        ['PartyType', 'Customer Type', 'select', false, PARTY_TYPES, 'Identity'],
+        ['CustomerGroup', 'Customer Group / Control', 'text', false, null, 'Identity'],
+        ['DisplayMode', 'Display As', 'select', false, DISPLAY_MODES, 'Identity'],
+
+        ['GSTIN', 'GSTIN', 'text', false, null, 'Tax & Address'],
+        ['PAN', 'PAN', 'text', false, null, 'Tax & Address'],
+        ['Address', 'Address', 'text', false, null, 'Tax & Address'],
+        ['ShippingAddress', 'Shipping Address', 'text', false, null, 'Tax & Address'],
+        ['City', 'City', 'text', false, null, 'Tax & Address'],
+        ['State', 'State', 'text', false, null, 'Tax & Address'],
+
+        ['Mobile', 'Phone No.', 'text', false, null, 'Contact'],
+        ['Email', 'Email', 'email', false, null, 'Contact'],
+        ['ContactPerson', 'Contact Person', 'text', false, null, 'Contact'],
+
+        ['CreditLimit', 'Credit Limit', 'number', false, null, 'Credit & Accounting'],
+        ['CreditDays', 'Credit Days', 'number', false, null, 'Credit & Accounting'],
+        ['PaymentTermID', 'Payment Term', 'paymentTerm', false, null, 'Credit & Accounting'],
+        ['ReconciliationAccountID', 'Reconciliation / Control Account', 'account', false, null, 'Credit & Accounting'],
+
+        ['BankName', 'Bank Name', 'text', false, null, 'Bank Details (optional)'],
+        ['BankAccountNo', 'Bank Account No.', 'text', false, null, 'Bank Details (optional)'],
+        ['BankIFSC', 'IFSC', 'text', false, null, 'Bank Details (optional)'],
+
+        ['RequireSerialTracking', 'Requires Serial Numbers on Sales', 'yesno', false, null, 'Other'],
+        ['CustomAttributes', 'Custom Attributes', 'text', false, null, 'Other'],
+        ['Reason', 'Reason / Remarks', 'text', false, null, 'Other'],
+      ],
+      columns: ['CustomerName', 'CustomerCode', 'GSTIN', 'Mobile', 'City', 'State', 'CreditLimit']
+    },
+    suppliers: {
+      endpoint: '/masters/suppliers',
+      title: 'Supplier',
+      fields: [
+        ['SupplierName', 'Name', 'text', true],
+        ['GSTIN', 'GSTIN', 'text', false],
+        ['PAN', 'PAN', 'text', false],
+        ['PartyType', 'Vendor Type', 'select', false, PARTY_TYPES],
+        ['Mobile', 'Phone No.', 'text', false],
+        ['Email', 'Email', 'email', false],
+        ['Address', 'Address', 'text', false],
+        ['State', 'State', 'text', false],
+        ['CreditDays', 'Credit Days', 'number', false],
+      ],
+      columns: ['SupplierName', 'GSTIN', 'Mobile', 'State']
+    },
+    items: {
+      endpoint: '/masters/items',
+      title: 'Item',
+      // Grouped, because thirty fields in one flat grid is a wall. The groups
+      // follow how the information is actually gathered: what the thing is,
+      // where it comes from, where it is kept, how it is traced, what it costs.
+      fields: [
+        ['ItemCode', 'Item Code', 'text', false, null, 'Identity'],
+        ['ItemName', 'Item Name', 'text', true, null, 'Identity'],
+        ['Category', 'Category', 'select', false, ITEM_CATEGORIES, 'Identity'],
+        ['MaterialType', 'Material Type', 'text', false, null, 'Identity'],
+        ['HSN', 'HSN / SAC Code', 'text', false, null, 'Identity'],
+        ['GSTRate', 'Tax %', 'number', false, null, 'Identity'],
+        ['Barcode', 'Barcode / SKU', 'text', false, null, 'Identity'],
+        ['CustomAttributes', 'Custom Attributes', 'text', false, null, 'Identity'],
+
+        ['Unit', 'UOM', 'text', false, null, 'Measurement'],
+        ['AltUnit', 'Alt UOM', 'text', false, null, 'Measurement'],
+        ['AltUnitFactor', 'Alt UOM Factor', 'number', false, null, 'Measurement'],
+        ['Dimensions', 'Dimensions / Weight', 'text', false, null, 'Measurement'],
+
+        ['PreferredVendorID', 'Preferred Vendor', 'vendor', false, null, 'Sourcing'],
+        ['LeadTimeDays', 'Lead Time (Days)', 'number', false, null, 'Sourcing'],
+        ['ReorderLevel', 'Reorder Level', 'number', false, null, 'Sourcing'],
+
+        ['Warehouse', 'Warehouse', 'text', false, null, 'Storage & Traceability'],
+        ['BinRack', 'Bin / Rack', 'text', false, null, 'Storage & Traceability'],
+        ['BatchTracking', 'Batch Tracking', 'yesno', false, null, 'Storage & Traceability'],
+        ['SerialTracking', 'Serial Tracking', 'yesno', false, null, 'Storage & Traceability'],
+        ['ShelfLifeMonths', 'Shelf Life (Months)', 'number', false, null, 'Storage & Traceability'],
+
+        ['CostingMethod', 'Costing Method', 'select', false, COSTING_METHODS, 'Costing & Pricing'],
+        ['PurchaseRate', 'Purchase Price', 'number', false, null, 'Costing & Pricing'],
+        ['StandardCost', 'Standard Cost', 'number', false, null, 'Costing & Pricing'],
+        ['SaleRate', 'Selling Price / MRP', 'number', false, null, 'Costing & Pricing'],
+        ['GLMapping', 'GL Mapping', 'text', false, null, 'Costing & Pricing'],
+
+        ['BOMLink', 'BOM Link', 'text', false, null, 'Production'],
+        ['YieldPercent', 'Yield %', 'number', false, null, 'Production'],
+        ['WastagePercent', 'Wastage %', 'number', false, null, 'Production'],
+        ['Remarks', 'Remarks', 'text', false, null, 'Production'],
+      ],
+      columns: ['ItemCode', 'ItemName', 'Category', 'HSN', 'GSTRate', 'Unit', 'PurchaseRate', 'SaleRate', 'ReorderLevel']
+    }
+  };
+
+  let activeTab = 'customers';
+
+  // One field descriptor renders as the right control. A yes/no stored as 0/1
+  // is a select rather than a checkbox because a blank checkbox and a
+  // deliberate "No" look identical, and on a master that distinction matters.
+  function fieldControl([key, label, type, required, options]) {
+    if (type === 'select') {
+      return `<select name="${key}" ${required ? 'required' : ''}>
+                <option value="">—</option>
+                ${(options || []).map(o => `<option value="${o}">${o}</option>`).join('')}
+              </select>`;
+    }
+    if (type === 'yesno') {
+      return `<select name="${key}">
+                <option value="0">No</option>
+                <option value="1">Yes</option>
+              </select>`;
+    }
+    if (type === 'vendor') {
+      return `<select name="${key}">
+                <option value="">—</option>
+                ${suppliers.map(v => `<option value="${esc(v.SupplierID)}">${escapeHtml(v.SupplierName)}</option>`).join('')}
+              </select>`;
+    }
+    if (type === 'account') {
+      return `<select name="${key}">
+                <option value="">—</option>
+                ${accounts.map(a => `<option value="${esc(a.AccountID)}">${escapeHtml(a.AccountCode)} - ${escapeHtml(a.AccountName)}</option>`).join('')}
+              </select>`;
+    }
+    if (type === 'paymentTerm') {
+      return `<select name="${key}">
+                <option value="">—</option>
+                ${paymentTerms.map(t => `<option value="${esc(t.PaymentTermID)}">${escapeHtml(t.Code)} - ${escapeHtml(t.Description || '')}</option>`).join('')}
+              </select>`;
+    }
+    return `<input name="${key}" type="${type}" ${required ? 'required' : ''} ${type === 'number' ? 'step="0.01"' : ''} />`;
+  }
+
+
+  function renderForm() {
+    const cfg = TABS[activeTab];
+    const formArea = document.getElementById('formArea');
+
+    // Fields carrying a group name are laid out under headings; a field list
+    // with no groups (customers, suppliers) renders as one grid exactly as
+    // before, so the simple screens stay simple.
+    const grouped = cfg.fields.some(f => f[5]);
+    let body;
+    if (grouped) {
+      const order = [];
+      const byGroup = {};
+      cfg.fields.forEach(f => {
+        const g = f[5] || 'Other';
+        if (!byGroup[g]) { byGroup[g] = []; order.push(g); }
+        byGroup[g].push(f);
+      });
+      body = order.map(g => `
+        <fieldset class="field-group">
+          <legend>${g}</legend>
+          <div class="form-grid">
+            ${byGroup[g].map(f => `
+              <div><label>${f[1]}${f[3] ? ' *' : ''}</label>${fieldControl(f)}</div>
+            `).join('')}
+          </div>
+        </fieldset>`).join('');
+    } else {
+      body = `<div class="form-grid">
+        ${cfg.fields.map(f => `<div><label>${f[1]}${f[3] ? ' *' : ''}</label>${fieldControl(f)}</div>`).join('')}
+      </div>`;
+    }
+
+    formArea.innerHTML = `
+      <h2>Add ${esc(cfg.title)}</h2>
+      <form id="masterForm">
+        ${body}
+        <div id="masterError" class="error-text" style="display:none;"></div>
+        <button class="btn" style="margin-top:14px;" type="submit">Save ${esc(cfg.title)}</button>
+      </form>
+    `;
+    document.getElementById('masterForm').addEventListener('submit', onSubmit);
+  }
+
+  async function onSubmit(e) {
+    e.preventDefault();
+    const cfg = TABS[activeTab];
+    const fd = new FormData(e.target);
+    const body = {};
+    cfg.fields.forEach(([key]) => {
+      const val = fd.get(key);
+      body[key] = val === '' ? undefined : val;
+    });
+    const errBox = document.getElementById('masterError');
+    errBox.style.display = 'none';
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalLabel = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `<span class="spinner"></span>Saving...`;
+    try {
+      await api(cfg.endpoint, { method: 'POST', body });
+      e.target.reset();
+      toast(`${esc(cfg.title)} saved.`, 'success');
+      await loadList();
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.style.display = 'block';
+      toast(err.message, 'error');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalLabel;
+    }
+  }
+
+  // Rows for the active tab are held so the search box can filter them without
+  // a fresh round-trip for every keystroke.
+  let currentRows = [];
+
+  async function loadList() {
+    const cfg = TABS[activeTab];
+    const listArea = document.getElementById('listArea');
+    listArea.innerHTML = '<p class="muted">Loading...</p>';
+    currentRows = await api(cfg.endpoint);
+    renderRows();
+  }
+
+  // The fields a search term is matched against, per tab - name and code first,
+  // plus the other identifiers someone might look a record up by.
+  const SEARCH_KEYS = {
+    customers: ['CustomerName', 'CustomerCode', 'SAPCode', 'GSTIN', 'Mobile', 'Email', 'City', 'State'],
+    suppliers: ['SupplierName', 'GSTIN', 'Mobile', 'Email', 'State'],
+    items: ['ItemName', 'ItemCode', 'HSN', 'Barcode', 'Category']
+  };
+
+  function renderRows() {
+    const cfg = TABS[activeTab];
+    const listArea = document.getElementById('listArea');
+    const term = (document.getElementById('searchBox').value || '').trim().toLowerCase();
+    const keys = SEARCH_KEYS[activeTab] || cfg.columns;
+    const rows = term
+      ? currentRows.filter(r => keys.some(k => String(r[k] == null ? '' : r[k]).toLowerCase().includes(term)))
+      : currentRows;
+
+    if (currentRows.length === 0) { listArea.innerHTML = '<p class="muted">No records yet.</p>'; return; }
+    if (rows.length === 0) { listArea.innerHTML = `<p class="muted">No ${esc(cfg.title.toLowerCase())}s match “${esc(term)}”.</p>`; return; }
+
+    const withPortal = activeTab === 'customers';
+    listArea.innerHTML = `
+      <table>
+        <thead><tr>${cfg.columns.map(c => `<th>${c}</th>`).join('')}${withPortal ? '<th>Portal login</th><th>Branch</th>' : ''}</tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr>${cfg.columns.map(c => `<td>${esc(r[c])}</td>`).join('')}${
+            withPortal
+              ? `<td><button class="btn secondary" data-portal="${esc(r.CustomerID)}" data-name="${esc(r.CustomerName || '')}">${portalLabel(r)}</button></td>
+                 <td><button class="btn secondary" data-move="${esc(r.CustomerID)}" data-name="${esc(r.CustomerName || '')}" data-branch="${esc(r.BranchID || '')}">Move…</button></td>`
+              : ''
+          }</tr>`).join('')}
+        </tbody>
+      </table>`;
+    listArea.querySelectorAll('[data-portal]').forEach(b =>
+      b.addEventListener('click', () => openPortalAccess(b.dataset.portal, b.dataset.name)));
+    listArea.querySelectorAll('[data-move]').forEach(b =>
+      b.addEventListener('click', () => openMoveBranch(b.dataset.move, b.dataset.name, b.dataset.branch)));
+  }
+
+  // What the button in the Portal login column says. The expiry is the part an
+  // account manager actually needs at a glance - "Enabled" on its own hides the
+  // fact that it runs out on Friday.
+  function portalLabel(r) {
+    if (!r.PortalEnabled) return 'Off';
+    if (!r.PortalExpiresAt) return 'Enabled · no expiry';
+    const days = Math.round((new Date(r.PortalExpiresAt + 'T00:00:00Z') - new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z')) / 86400000);
+    if (days < 0) return `Expired ${fmtDate(r.PortalExpiresAt)}`;
+    if (days === 0) return 'Expires today';
+    if (days <= 14) return `${days} day${days === 1 ? '' : 's'} left`;
+    return `Until ${fmtDate(r.PortalExpiresAt)}`;
+  }
+
+  // ---- Grant or withdraw a customer's portal login ----
+  // Deliberately a separate dialog from the customer form: enabling a login is
+  // an access decision, not a data edit, and it deserves its own confirmation.
+  async function openPortalAccess(customerId, name) {
+    let state;
+    try {
+      state = await api(`/masters/customers/${customerId}/portal-access`);
+    } catch (e) { return toast(e.message, 'error'); }
+
+    // Current standing, said plainly, before anything can be changed.
+    const standing = !state.enabled
+      ? '<span class="pill">Off</span> No portal login.'
+      : state.expired
+        ? `<span class="pill bad">Expired</span> Ran out on <b>${fmtDate(state.expiresAt)}</b>. Pick a new term below to renew.`
+        : state.expiresAt
+          ? `<span class="pill ${state.expiringSoon ? 'warn' : 'ok'}">Active</span> Valid until <b>${fmtDate(state.expiresAt)}</b>` +
+            ` — ${state.daysRemaining} day${state.daysRemaining === 1 ? '' : 's'} left.`
+          : '<span class="pill ok">Active</span> No expiry set.';
+
+    const modal = openModal(`Portal access — ${name}`, `
+      <p class="muted" style="margin-top:0;">
+        ${state.email
+          ? `They sign in at the login screen as <b>Customer</b>, using <b>${esc(state.email)}</b>.`
+          : '<span style="color:var(--danger);">This customer has no email address. Add one first — it is their login.</span>'}
+      </p>
+
+      <div class="access-standing">${standing}</div>
+
+      <label class="switch-row" style="margin:14px 0;">
+        <input type="checkbox" id="paEnabled" ${state.enabled ? 'checked' : ''} />
+        <span>Allow this customer to sign in to the portal</span>
+      </label>
+
+      <label>Access period</label>
+      <div class="term-grid" id="paTerms">
+        ${state.terms.map(t => `
+          <button type="button" class="term-card" data-term="${t.months === null ? 'never' : t.months}">
+            <span class="term-label">${t.label}</span>
+            <span class="term-until" data-until-for="${t.months === null ? 'never' : t.months}"></span>
+          </button>`).join('')}
+      </div>
+      <p class="muted" style="font-size:0.8rem;margin-top:8px;" id="paTermNote">
+        Leave the period untouched to keep the current one. Renewing early adds
+        the new term on top of the days still remaining, so nothing is lost.
+      </p>
+
+      <label style="margin-top:12px;display:block;">${state.hasPassword ? 'Reset password (leave blank to keep the current one)' : 'Set a password *'}</label>
+      <input type="password" id="paPassword" autocomplete="new-password" placeholder="At least 8 characters" />
+      <p class="muted" style="font-size:0.8rem;margin-top:8px;">
+        There is no mail provider configured, so pass the password to the customer yourself.
+        They can change it once they are in.
+      </p>
+      ${state.lastLogin ? `<p class="muted" style="font-size:0.8rem;">Last signed in: ${fmtDate(state.lastLogin)}</p>` : ''}
+      <div id="paError" class="error-text" style="display:none;"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn" id="paSave" data-loading-text="Saving…">Save</button>
+        <button class="btn secondary" id="paCancel">Cancel</button>
+      </div>`);
+
+    // Show what date each term would actually run to, computed the same way the
+    // server does: from the existing expiry when it is still live, else today.
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const stillLive = state.expiresAt && !state.expired ? state.expiresAt : todayIso;
+    const addMonths = (fromIso, months) => {
+      const d = new Date(fromIso + 'T00:00:00Z');
+      const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, 1));
+      const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+      target.setUTCDate(Math.min(d.getUTCDate(), lastDay));
+      return target.toISOString().slice(0, 10);
+    };
+    modal.querySelectorAll('[data-until-for]').forEach(node => {
+      const v = node.dataset.untilFor;
+      node.textContent = v === 'never' ? 'never lapses' : 'to ' + fmtDate(addMonths(stillLive, Number(v)));
+    });
+
+    let chosenTerm = null;      // null = leave the current term alone
+    modal.querySelectorAll('.term-card').forEach(card => {
+      card.addEventListener('click', () => {
+        chosenTerm = card.dataset.term;
+        modal.querySelectorAll('.term-card').forEach(c => c.classList.toggle('selected', c === card));
+        modal.querySelector('#paTermNote').textContent = chosenTerm === 'never'
+          ? 'This access will not expire on its own. You will have to switch it off by hand.'
+          : `Access will run to ${fmtDate(addMonths(stillLive, Number(chosenTerm)))}.`;
+      });
+    });
+
+    modal.querySelector('#paCancel').addEventListener('click', closeModal);
+    const save = modal.querySelector('#paSave');
+    save.addEventListener('click', withLoading(save, async () => {
+      const errBox = modal.querySelector('#paError');
+      errBox.style.display = 'none';
+      try {
+        const res = await api(`/masters/customers/${customerId}/portal-access`, {
+          method: 'POST',
+          body: {
+            enabled: modal.querySelector('#paEnabled').checked,
+            password: modal.querySelector('#paPassword').value || undefined,
+            termMonths: chosenTerm || undefined
+          }
+        });
+        closeModal();
+        toast(
+          res.enabled
+            ? (res.expiresAt ? `Portal access active until ${fmtDate(res.expiresAt)}.` : 'Portal access enabled, with no expiry.')
+            : 'Portal access switched off.',
+          'success');
+        await loadList();
+      } catch (e) {
+        errBox.textContent = e.message;
+        errBox.style.display = 'block';
+      }
+    }));
+  }
+
+  // ---- Move a customer to a different home branch ----
+  async function openMoveBranch(customerId, name, currentBranchId) {
+    const modal = openModal(`Move branch — ${name}`, `
+      <p class="muted" style="margin-top:0;">The customer stays visible company-wide either way; this only changes which branch it defaults to.</p>
+      <label>Home branch</label>
+      <select id="mvBranch">
+        <option value="">— None —</option>
+        ${branches.map(b => `<option value="${esc(b.BranchID)}" ${String(b.BranchID) === String(currentBranchId) ? 'selected' : ''}>${escapeHtml(b.BranchName)}</option>`).join('')}
+      </select>
+      <div id="mvError" class="error-text" style="display:none;margin-top:8px;"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn" id="mvSave" data-loading-text="Moving…">Move</button>
+        <button class="btn secondary" id="mvCancel">Cancel</button>
+      </div>`);
+    modal.querySelector('#mvCancel').addEventListener('click', closeModal);
+    const save = modal.querySelector('#mvSave');
+    save.addEventListener('click', withLoading(save, async () => {
+      const errBox = modal.querySelector('#mvError');
+      errBox.style.display = 'none';
+      try {
+        await api(`/masters/customers/${customerId}/move-branch`, { method: 'POST', body: { branchId: modal.querySelector('#mvBranch').value || undefined } });
+        closeModal();
+        toast(`${name} moved.`, 'success');
+        await loadList();
+      } catch (e) {
+        errBox.textContent = e.message;
+        errBox.style.display = 'block';
+      }
+    }));
+  }
+
+  // ---- Bulk import ----
+  // The columns the sheet may use are listed per entity so the dialog can say
+  // what it understands before someone uploads the wrong file and finds out.
+  const IMPORT_HINTS = {
+    customers: 'Headings are matched loosely, so "Customer Name", "customer_name" and "Name" all work. Recognised columns: Name (required), GSTIN, Mobile, Email, Address, State, Credit Limit, Credit Days, Opening Balance. A customer whose name or GSTIN already exists is skipped, never overwritten.',
+    suppliers: 'Recognised columns: Name (required), GSTIN, Mobile, Email, Address, State, Credit Days, Opening Balance. A supplier whose name or GSTIN already exists is skipped, never overwritten.',
+    items: 'Recognised columns: Item Name (required), HSN, GST %, Unit, Barcode, Purchase Rate, Sale Rate, Reorder Level. An item whose name or barcode already exists is skipped, never overwritten.'
+  };
+
+  function openImportForActiveTab() {
+    const cfg = TABS[activeTab];
+    openImportDialog({
+      title: `Import ${cfg.title.toLowerCase()}s from a spreadsheet`,
+      endpoint: `/masters/${activeTab}/import`,
+      templateUrl: `/masters/${activeTab}/import/template.csv`,
+      hint: IMPORT_HINTS[activeTab],
+      onDone: loadList
+    });
+  }
+  document.getElementById('importBtn').addEventListener('click', openImportForActiveTab);
+
+  // Live filter: re-render the already-loaded rows as the user types.
+  document.getElementById('searchBox').addEventListener('input', renderRows);
+
+  function syncToolbar() {
+    document.getElementById('listTitle').textContent = TABS[activeTab].title + 's';
+    document.getElementById('importBtn').textContent = `⬆ Import ${TABS[activeTab].title.toLowerCase()}s`;
+  }
+
+  document.querySelectorAll('[data-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeTab = btn.dataset.tab;
+      document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('secondary', b !== btn));
+      document.getElementById('searchBox').value = '';
+      syncToolbar();
+      renderForm();
+      loadList();
+    });
+  });
+
+  // The vendor picker needs the supplier list before the item form is drawn;
+  // the customer form needs branches (move action), accounts (reconciliation
+  // account) and payment terms up front too.
+  try { suppliers = await api('/masters/suppliers'); } catch (e) { suppliers = []; }
+  try { branches = await api('/branches'); } catch (e) { branches = []; }
+  try { accounts = await api('/accounts/accounts'); } catch (e) { accounts = []; }
+  try { paymentTerms = await api('/masters/payment-terms'); } catch (e) { paymentTerms = []; }
+
+  syncToolbar();
+  renderForm();
+  loadList();
+  attachHoverEffects();
+})();
+</script>
+</body>
+</html>

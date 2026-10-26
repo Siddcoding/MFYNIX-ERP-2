@@ -1,0 +1,26 @@
+# Keep the build context small and keep secrets and live data out of the image.
+node_modules
+**/node_modules
+.git
+.gitignore
+
+# Live business data must never be baked into an image.
+*.db
+*.db-wal
+*.db-shm
+
+# Real secrets. .env.example is fine; .env is not.
+.env
+**/.env
+
+# Tests and their output are not needed at runtime.
+browser-test*.js
+test-*.sh
+run-tests.sh
+shot-*.png
+
+.vscode
+*.log
+nohup.out
+README.md
+DEPLOY.md

@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Credit / Debit Notes - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('notes');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Credit &amp; Debit Notes</h2>
+    <p class="muted">
+      A <strong>credit note</strong> reverses part or all of a sales invoice — goods returned, or an allowance given.
+      A <strong>debit note</strong> does the same against a purchase. Unlike cancelling, a note is a document in its own
+      right with its own number, and it is the correct remedy once the period's GST return has been filed.
+    </p>
+  </div>
+
+  <div class="card" id="formCard">
+    <h2>Raise a note</h2>
+    <form id="noteForm">
+      <div class="form-grid">
+        <div><label>Type *</label>
+          <select name="noteType" id="noteType">
+            <option value="Credit">Credit note (against a sale)</option>
+            <option value="Debit">Debit note (against a purchase)</option>
+          </select>
+        </div>
+        <div id="branchWrap" style="display:none;"><label>Branch *</label><select name="branchId" id="branchSel"></select></div>
+        <div><label>Date *</label><input type="date" name="noteDate" id="noteDate" required /></div>
+        <div><label>Against document</label><select id="againstDoc"><option value="">— none, standalone note —</option></select></div>
+        <div><label>Party *</label><select name="partyId" id="partySel" required></select></div>
+      </div>
+      <div id="docExtrasSlot"></div>
+      <p class="muted" id="remainingHint" style="margin-top:6px;"></p>
+
+      <div class="checkbox-row" style="margin-top:10px;">
+        <label><input type="checkbox" id="restoreStock" checked /> Goods physically came back (adjust stock)</label>
+      </div>
+      <p class="muted" style="font-size:0.8rem;">Untick for a pure price allowance or discount, where no goods moved.</p>
+
+      <h3 style="margin:16px 0 8px;font-size:0.9rem;">Lines</h3>
+      <div id="lineItems"></div>
+      <button type="button" class="btn secondary" id="addLineBtn" style="margin-top:8px;">+ Add line</button>
+
+      <label style="margin-top:14px;display:block;">Reason *</label>
+      <input name="reason" placeholder="e.g. 5 units returned damaged" required />
+
+      <div style="margin-top:14px;font-weight:600;">Note value: <span id="netPreview">₹0</span></div>
+      <div id="noteError" class="error-text" style="display:none;"></div>
+      <button class="btn" type="submit" data-loading-text="Posting…" style="margin-top:14px;">Post note</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Notes raised</h2>
+    <div class="filter-bar">
+      <div><label>Search</label><input id="fSearch" placeholder="Note no or reason" /></div>
+      <div><label>Type</label><select id="fType"><option value="">All</option><option>Credit</option><option>Debit</option></select></div>
+      <div><label>From</label><input id="fFrom" type="date" /></div>
+      <div><label>To</label><input id="fTo" type="date" /></div>
+      <div><button class="btn secondary" id="fClear">Clear</button></div>
+    </div>
+    <div id="noteList"></div>
+    <div id="notePager"></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+
+  // The statutory reference/transport block, shared by every document type.
+  document.getElementById('docExtrasSlot').innerHTML = documentExtrasHtml();
+  initDocumentExtras();
+  const user = Auth.getUser();
+  const ROLES = ['Super Admin', 'Company Admin', 'Accountant', 'Branch Manager', 'Auditor'];
+  if (!ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to Credit / Debit Notes.</p></div>';
+    return;
+  }
+  const canPost = !['Auditor', 'Read Only'].includes(user.role);
+  if (!canPost) document.getElementById('formCard').style.display = 'none';
+
+
+  document.getElementById('noteDate').valueAsDate = new Date();
+
+  let items = [], customers = [], suppliers = [], branches = [];
+  async function loadRefData() {
+    [items, customers, suppliers] = await Promise.all([
+      api('/masters/items'), api('/masters/customers'), api('/masters/suppliers')
+    ]);
+    if (!user.branchId) {
+      branches = await api('/branches');
+      document.getElementById('branchWrap').style.display = 'block';
+      document.getElementById('branchSel').innerHTML = branches.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('');
+      document.getElementById('branchSel').addEventListener('change', loadAgainstOptions);
+    }
+    syncType();
+  }
+
+  function itemOptions() {
+    return items.map(i => `<option value="${esc(i.ItemID)}" data-gst="${esc(i.GSTRate) || 0}" data-rate="${esc(i.SaleRate) || 0}">${esc(i.ItemName)}</option>`).join('');
+  }
+
+  function addLine(prefill) {
+    const row = el(`
+      <div class="form-grid line-row" style="margin-bottom:8px;align-items:end;">
+        <div><label>Item</label><select class="li-item">${itemOptions()}</select></div>
+        <div><label>Qty</label><input class="li-qty" type="number" step="0.01" min="0.01" value="1" /></div>
+        <div><label>Rate</label><input class="li-rate" type="number" step="0.01" min="0" value="0" /></div>
+        <div><label>GST %</label><input class="li-gst" type="number" step="0.01" min="0" value="0" /></div>
+        <div><button type="button" class="btn secondary remove-line">Remove</button></div>
+      </div>`);
+    document.getElementById('lineItems').appendChild(row);
+    const itemSel = row.querySelector('.li-item');
+    const syncFromItem = () => {
+      const opt = itemSel.selectedOptions[0];
+      if (!opt) return;
+      row.querySelector('.li-rate').value = opt.dataset.rate || 0;
+      row.querySelector('.li-gst').value = opt.dataset.gst || 0;
+      recalc();
+    };
+    itemSel.addEventListener('change', syncFromItem);
+    row.querySelectorAll('input').forEach(i => i.addEventListener('input', recalc));
+    row.querySelector('.remove-line').addEventListener('click', () => { row.remove(); recalc(); });
+
+    if (prefill) {
+      itemSel.value = prefill.ItemID;
+      row.querySelector('.li-qty').value = prefill.Qty;
+      row.querySelector('.li-rate').value = prefill.Rate;
+      row.querySelector('.li-gst').value = prefill.GST || 0;
+    } else { syncFromItem(); }
+    recalc();
+  }
+
+  function collectLines() {
+    return [...document.querySelectorAll('.line-row')].map(r => ({
+      itemId: Number(r.querySelector('.li-item').value),
+      qty: Number(r.querySelector('.li-qty').value),
+      rate: Number(r.querySelector('.li-rate').value),
+      gst: Number(r.querySelector('.li-gst').value)
+    })).filter(l => l.itemId && l.qty > 0);
+  }
+
+  function recalc() {
+    const net = collectLines().reduce((s, l) => {
+      const base = l.qty * l.rate;
+      return s + base + base * (l.gst / 100);
+    }, 0);
+    document.getElementById('netPreview').textContent = fmtMoney(net);
+  }
+
+  document.getElementById('addLineBtn').addEventListener('click', () => addLine());
+
+  function currentBranch() { return user.branchId || document.getElementById('branchSel')?.value; }
+
+  function syncType() {
+    const isCredit = document.getElementById('noteType').value === 'Credit';
+    const parties = isCredit ? customers : suppliers;
+    document.getElementById('partySel').innerHTML = parties.map(p =>
+      `<option value="${isCredit ? p.CustomerID : p.SupplierID}">${esc(isCredit ? p.CustomerName : p.SupplierName)}</option>`).join('');
+    loadAgainstOptions();
+  }
+  document.getElementById('noteType').addEventListener('change', syncType);
+
+  // Offer the invoices this note could be raised against, newest first.
+  async function loadAgainstOptions() {
+    const isCredit = document.getElementById('noteType').value === 'Credit';
+    const sel = document.getElementById('againstDoc');
+    sel.innerHTML = '<option value="">— none, standalone note —</option>';
+    try {
+      const res = await api(isCredit ? '/sales' : '/purchase', { params: { branchId: currentBranch(), pageSize: 100, status: 'Posted' } });
+      rowsOf(res).forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = isCredit ? d.InvoiceID : d.PurchaseID;
+        opt.textContent = `${isCredit ? d.InvoiceNo : d.PurchaseNo} — ${isCredit ? d.CustomerName : d.SupplierName} — ${fmtMoney(d.NetAmount)}`;
+        opt.dataset.party = isCredit ? d.CustomerID : d.SupplierID;
+        sel.appendChild(opt);
+      });
+    } catch (e) { /* the list is optional; a standalone note still works */ }
+  }
+
+  // Picking an invoice prefills the party and the lines - that's the common case.
+  document.getElementById('againstDoc').addEventListener('change', async () => {
+    const sel = document.getElementById('againstDoc');
+    const hint = document.getElementById('remainingHint');
+    document.getElementById('lineItems').innerHTML = '';
+    if (!sel.value) { hint.textContent = ''; addLine(); return; }
+    const isCredit = document.getElementById('noteType').value === 'Credit';
+    try {
+      const d = await api(`/notes/against/${isCredit ? 'sales' : 'purchase'}/${sel.value}`);
+      const party = sel.selectedOptions[0].dataset.party;
+      if (party) document.getElementById('partySel').value = party;
+      hint.textContent = `${fmtMoney(d.remaining)} of that document is still uncredited — this note cannot exceed it.`;
+      d.lines.forEach(l => addLine(l));
+    } catch (e) {
+      hint.textContent = e.message;
+      addLine();
+    }
+  });
+
+  const form = document.getElementById('noteForm');
+  if (form) {
+    const submit = form.querySelector('button[type=submit]');
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(submit, async () => {
+        const errBox = document.getElementById('noteError');
+        errBox.style.display = 'none';
+        const lines = collectLines();
+        if (lines.length === 0) {
+          errBox.textContent = 'Add at least one line.';
+          errBox.style.display = 'block';
+          return;
+        }
+        const body = {
+          noteType: document.getElementById('noteType').value,
+          noteDate: form.noteDate.value,
+          // A note already uses "partyType" for Customer vs Supplier, so the
+          // registration category travels under its own name to avoid a clash.
+          ...(() => {
+            const x = collectDocumentExtras(form);
+            if (x.partyType) { x.partyCategory = x.partyType; delete x.partyType; }
+            return x;
+          })(),
+          partyId: Number(document.getElementById('partySel').value),
+          againstDocId: document.getElementById('againstDoc').value || undefined,
+          reason: form.reason.value,
+          restoreStock: document.getElementById('restoreStock').checked,
+          branchId: currentBranch() ? Number(currentBranch()) : undefined,
+          items: lines
+        };
+        try {
+          const r = await api('/notes', { method: 'POST', body });
+          toast(`${body.noteType} note ${esc(r.noteNo)} posted — ${fmtMoney(r.netAmount)}`, 'success');
+          showSuccessBurst('Note posted');
+          document.getElementById('lineItems').innerHTML = '';
+          addLine();
+          form.reason.value = '';
+          document.getElementById('againstDoc').value = '';
+          document.getElementById('remainingHint').textContent = '';
+          recalc();
+          await loadNotes(1);
+          await loadAgainstOptions();
+        } catch (err) {
+          errBox.textContent = err.message;
+          errBox.style.display = 'block';
+          toast(err.message, 'error');
+        }
+      })();
+    });
+  }
+
+  let notePage = 1;
+  async function loadNotes(page) {
+    if (page) notePage = page;
+    const res = await api('/notes', { params: {
+      page: notePage,
+      search: document.getElementById('fSearch').value,
+      noteType: document.getElementById('fType').value,
+      from: document.getElementById('fFrom').value,
+      to: document.getElementById('fTo').value
+    } });
+    const rows = rowsOf(res);
+    renderPager(document.getElementById('notePager'), res, (n) => loadNotes(n));
+    document.getElementById('noteList').innerHTML = renderTable(rows.map(n => ({
+      Note: n.NoteNo,
+      Type: `<span class="badge ${n.NoteType === 'Credit' ? 'ok' : 'warn'}">${esc(n.NoteType)}</span>`,
+      Date: fmtDate(n.NoteDate), Party: n.PartyName || '—',
+      Against: n.AgainstDocNo || '—', Branch: n.BranchName,
+      Value: fmtMoney(n.NetAmount), Stock: n.RestoreStock ? 'Adjusted' : 'No movement',
+      Reason: n.Reason
+    })), [
+      { key: 'Note', label: 'Note no' }, { key: 'Type', label: 'Type', render: r => r.Type },
+      { key: 'Date', label: 'Date' }, { key: 'Party', label: 'Party' },
+      { key: 'Against', label: 'Against' }, { key: 'Branch', label: 'Branch' },
+      { key: 'Value', label: 'Value', align: 'right' }, { key: 'Stock', label: 'Stock' },
+      { key: 'Reason', label: 'Reason' }
+    ], 'No notes raised yet.');
+  }
+
+  ['fSearch', 'fType', 'fFrom', 'fTo'].forEach(id => {
+    const node = document.getElementById(id);
+    const evt = node.tagName === 'SELECT' || node.type === 'date' ? 'change' : 'input';
+    let t;
+    node.addEventListener(evt, () => { clearTimeout(t); t = setTimeout(() => loadNotes(1), 250); });
+  });
+  document.getElementById('fClear').addEventListener('click', () => {
+    ['fSearch', 'fFrom', 'fTo'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('fType').value = '';
+    loadNotes(1);
+  });
+
+  await loadRefData();
+  addLine();
+  await loadNotes();
+  attachHoverEffects();
+})();
+</script>
+</body>
+</html>

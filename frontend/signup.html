@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Request Access - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-brand"><img src="img/mfynix-logo.png" alt="Mfynix" /></div>
+      <p class="sub" id="cardSub">Request admin access to the ERP.</p>
+
+      <form id="signupForm">
+        <div class="field">
+          <label for="fullName">Full name</label>
+          <input id="fullName" name="fullName" autocomplete="name" placeholder="Your name" />
+        </div>
+        <div class="field">
+          <label for="email">Email address</label>
+          <input id="email" name="email" type="email" autocomplete="username" placeholder="you@company.com" required />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" required minlength="8" />
+        </div>
+        <div class="field">
+          <label for="confirmPassword">Confirm password</label>
+          <input id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" placeholder="Re-enter it" required minlength="8" />
+        </div>
+        <button class="btn" type="submit" id="signupBtn" data-loading-text="Submitting…">Create account</button>
+      </form>
+
+      <div id="doneBox" style="display:none;text-align:center;padding:10px 0;">
+        <div style="font-size:2rem;">✅</div>
+        <p id="doneMsg" style="margin:10px 0;"></p>
+        <a href="index.html" class="btn secondary" style="display:inline-block;text-decoration:none;">Go to login</a>
+      </div>
+
+      <div class="login-hint">
+        Pre-approved emails get access instantly. Everyone else is reviewed by an
+        administrator before they can sign in.
+      </div>
+      <a href="index.html" class="back-link">&larr; Back to login</a>
+    </div>
+  </div>
+
+  <script src="js/common.js"></script>
+  <script>
+    initAuroraBackground();
+    document.getElementById('signupForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(document.getElementById('signupBtn'), async () => {
+        const fullName = document.getElementById('fullName').value.trim();
+        const email = document.getElementById('email').value.trim();
+        const password = document.getElementById('password').value;
+        if (password !== document.getElementById('confirmPassword').value) return toast('The two passwords do not match.', 'error');
+        try {
+          const data = await api('/auth/signup', { method: 'POST', body: { fullName, email, password } });
+          document.getElementById('signupForm').style.display = 'none';
+          document.getElementById('doneBox').style.display = 'block';
+          document.getElementById('doneMsg').textContent = data.message;
+          document.getElementById('cardSub').textContent = data.status === 'Active' ? 'Account ready' : 'Request submitted';
+          toast(data.message, 'success', 4000);
+        } catch (err) { toast(err.message, 'error'); }
+      })();
+    });
+  </script>
+</body>
+</html>

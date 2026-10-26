@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Inventory - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('inventory');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Inter-Branch Stock Transfer</h2>
+    <form id="transferForm">
+      <div class="form-grid">
+        <div id="fromWrap" style="display:none;"><label>From Branch *</label><select name="fromBranchId" id="fromBranch"></select></div>
+        <div><label>To Branch *</label><select name="toBranchId" id="toBranch"></select></div>
+        <div><label>Item *</label><select name="itemId" id="itemSelect"></select></div>
+        <div><label>Qty *</label><input name="qty" type="number" step="0.01" min="0.01" required /></div>
+      </div>
+      <div id="transferError" class="error-text" style="display:none;"></div>
+      <button class="btn" type="submit" style="margin-top:14px;">Transfer Stock</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Stock Adjustment / Opening Balance</h2>
+    <p class="muted">Use this to load opening stock when you go live, and to correct the book quantity after a physical
+      count. It writes to the stock ledger only — purchases are already expensed directly, so an adjustment has no
+      journal entry to post against.</p>
+    <form id="adjustForm">
+      <div class="form-grid">
+        <div id="adjBranchWrap" style="display:none;"><label>Branch *</label><select name="branchId" id="adjBranch"></select></div>
+        <div><label>Item *</label><select name="itemId" id="adjItem" required></select></div>
+        <div><label>Type *</label><select name="adjustmentType" id="adjType" required></select></div>
+        <div><label id="adjQtyLabel">Quantity *</label><input name="qty" id="adjQty" type="number" step="0.01" min="0" required /></div>
+        <div><label>Date</label><input name="adjustDate" type="date" id="adjDate" /></div>
+        <div><label>Reason *</label><input name="reason" placeholder="e.g. Opening balance as on go-live" required /></div>
+      </div>
+      <p class="muted" id="adjHint" style="margin-top:8px;"></p>
+      <div id="adjustError" class="error-text" style="display:none;"></div>
+      <button class="btn" type="submit" data-loading-text="Adjusting…" style="margin-top:12px;">Apply adjustment</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Current Stock</h2>
+    <div id="stockTable"></div>
+  </div>
+
+  <div class="card">
+    <h2>Item Stock Ledger</h2>
+    <p class="muted">Every movement behind a stock figure, with a running balance.</p>
+    <div class="form-grid">
+      <div id="ledgerBranchWrap" style="display:none;"><label>Branch</label><select id="ledgerBranch"></select></div>
+      <div><label>Item</label><select id="ledgerItem"></select></div>
+    </div>
+    <div id="ledgerTable" style="margin-top:14px;"></div>
+  </div>
+
+  <div class="card">
+    <h2>Low Stock Alerts</h2>
+    <div id="lowStockTable"></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+
+  let branches = [];
+  let allItems = [];
+  async function loadRefData() {
+    branches = await api('/branches');
+    allItems = await api('/masters/items');
+    const items = allItems;
+    document.getElementById('itemSelect').innerHTML = items.map(i => `<option value="${esc(i.ItemID)}">${esc(i.ItemName)}</option>`).join('');
+    document.getElementById('toBranch').innerHTML = branches.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('');
+
+    if (!user.branchId) {
+      document.getElementById('fromWrap').style.display = 'block';
+      document.getElementById('fromBranch').innerHTML = branches.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('');
+    }
+  }
+
+  document.getElementById('transferForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errBox = document.getElementById('transferError');
+    errBox.style.display = 'none';
+    const fd = new FormData(e.target);
+    const body = {
+      fromBranchId: user.branchId || Number(fd.get('fromBranchId')),
+      toBranchId: Number(fd.get('toBranchId')),
+      itemId: Number(fd.get('itemId')),
+      qty: Number(fd.get('qty'))
+    };
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalLabel = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `<span class="spinner"></span>Transferring...`;
+    try {
+      await api('/inventory/transfer', { method: 'POST', body });
+      showSuccessBurst('Stock transferred');
+      toast('Stock transferred successfully.', 'success');
+      e.target.reset();
+      await loadStock();
+      await loadLowStock();
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.style.display = 'block';
+      toast(err.message, 'error');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalLabel;
+    }
+  });
+
+  async function loadStock() {
+    const rows = await api('/inventory/stock');
+    const target = document.getElementById('stockTable');
+    if (rows.length === 0) { target.innerHTML = '<p class="muted">No stock movements yet.</p>'; return; }
+    target.innerHTML = `
+      <table>
+        <thead><tr><th>Branch</th><th>Item</th><th>Current Stock</th><th>Unit</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${esc(r.BranchName)}</td><td>${esc(r.ItemName)}</td><td>${esc(r.CurrentStock)}</td><td>${esc(r.Unit) || ''}</td></tr>`).join('')}</tbody>
+      </table>`;
+  }
+
+  async function loadLowStock() {
+    const rows = await api('/inventory/low-stock');
+    const target = document.getElementById('lowStockTable');
+    if (rows.length === 0) { target.innerHTML = '<p class="muted">All items are above reorder level.</p>'; return; }
+    target.innerHTML = `
+      <table>
+        <thead><tr><th>Branch</th><th>Item</th><th>Current Stock</th><th>Reorder Level</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${esc(r.BranchName)}</td><td>${esc(r.ItemName)}</td><td>${esc(r.CurrentStock)}</td><td>${esc(r.ReorderLevel)}</td></tr>`).join('')}</tbody>
+      </table>`;
+  }
+
+  // ---------------- Stock adjustment ----------------
+  const ADJ_HINTS = {
+    'Opening Stock': 'Only for an item with no movement yet at this branch — the quantity you are starting with.',
+    'Increase': 'Adds stock that arrived without a purchase bill (a free sample, a found item, a correction upward).',
+    'Decrease': 'Removes stock without a sale. Cannot take a branch below zero.',
+    'Damage / Loss': 'Removes stock written off as damaged, expired or lost.',
+    'Physical Count Correction': 'Enter the quantity you actually counted — the system works out the difference itself.'
+  };
+
+  async function setupAdjustment() {
+    const types = await api('/inventory/adjustment-types');
+    document.getElementById('adjType').innerHTML = types.map(t => `<option>${t}</option>`).join('');
+    document.getElementById('adjItem').innerHTML = allItems.map(i => `<option value="${esc(i.ItemID)}">${esc(i.ItemName)}</option>`).join('');
+    document.getElementById('ledgerItem').innerHTML = allItems.map(i => `<option value="${esc(i.ItemID)}">${esc(i.ItemName)}</option>`).join('');
+    document.getElementById('adjDate').valueAsDate = new Date();
+
+    if (!user.branchId) {
+      const opts = branches.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('');
+      document.getElementById('adjBranchWrap').style.display = 'block';
+      document.getElementById('adjBranch').innerHTML = opts;
+      document.getElementById('ledgerBranchWrap').style.display = 'block';
+      document.getElementById('ledgerBranch').innerHTML = opts;
+      document.getElementById('ledgerBranch').addEventListener('change', loadItemLedger);
+    }
+    document.getElementById('ledgerItem').addEventListener('change', loadItemLedger);
+
+    const typeSel = document.getElementById('adjType');
+    const syncHint = () => {
+      document.getElementById('adjHint').textContent = ADJ_HINTS[typeSel.value] || '';
+      document.getElementById('adjQtyLabel').textContent =
+        typeSel.value === 'Physical Count Correction' ? 'Counted quantity *' : 'Quantity *';
+    };
+    typeSel.addEventListener('change', syncHint);
+    syncHint();
+
+    const form = document.getElementById('adjustForm');
+    const submit = form.querySelector('button[type=submit]');
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(submit, async () => {
+        const errBox = document.getElementById('adjustError');
+        errBox.style.display = 'none';
+        const body = Object.fromEntries(new FormData(form).entries());
+        try {
+          const r = await api('/inventory/adjust', { method: 'POST', body });
+          toast(`${esc(r.itemName)}: ${r.previousStock} → ${r.newStock}`, 'success');
+          showSuccessBurst('Stock adjusted');
+          form.reset();
+          document.getElementById('adjDate').valueAsDate = new Date();
+          syncHint();
+          await loadStock();
+          await loadItemLedger();
+        } catch (err) {
+          errBox.textContent = err.message;
+          errBox.style.display = 'block';
+          toast(err.message, 'error');
+        }
+      })();
+    });
+  }
+
+  async function loadItemLedger() {
+    const target = document.getElementById('ledgerTable');
+    const itemId = document.getElementById('ledgerItem').value;
+    const branchId = user.branchId || document.getElementById('ledgerBranch')?.value;
+    if (!itemId || !branchId) { target.innerHTML = '<p class="muted">Pick an item to see its movements.</p>'; return; }
+    try {
+      const d = await api('/inventory/ledger', { params: { itemId, branchId } });
+      if (d.entries.length === 0) { target.innerHTML = '<p class="muted">No movement recorded for this item at this branch.</p>'; return; }
+      target.innerHTML = renderTable(d.entries.map(e => ({
+        Date: fmtDate(e.TransDate), Type: e.TransType.replace(/_/g, ' '),
+        Reference: e.RefType ? `${esc(e.RefType)}${e.RefID ? ' #' + e.RefID : ''}` : '—',
+        In: e.InQty || '', Out: e.OutQty || '', Balance: e.RunningBalance
+      }), [
+        { key: 'Date', label: 'Date' }, { key: 'Type', label: 'Movement' }, { key: 'Reference', label: 'Reference' },
+        { key: 'In', label: 'In', align: 'right' }, { key: 'Out', label: 'Out', align: 'right' },
+        { key: 'Balance', label: 'Balance', align: 'right' }
+      ])) + `<p style="margin-top:10px;"><strong>Closing stock: ${d.closingStock}</strong></p>`;
+    } catch (e) {
+      target.innerHTML = `<p class="error-text">${esc(e.message)}</p>`;
+    }
+  }
+
+  await loadRefData();
+  await setupAdjustment();
+  await loadStock();
+  await loadLowStock();
+  await loadItemLedger();
+  attachHoverEffects();
+})();
+</script>
+</body>
+</html>

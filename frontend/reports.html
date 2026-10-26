@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Reports - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('reports');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Reports</h2>
+    <p class="muted">Every report reads from the same transaction data, so nothing here can disagree with the ledger. All of them export to CSV.</p>
+    <div class="form-grid" style="margin-top:14px;">
+      <div><label>Report</label><select id="reportSel"></select></div>
+      <div id="branchFilterWrap"></div>
+      <div id="fromWrap"><label>From</label><input type="date" id="fromDate" /></div>
+      <div id="toWrap"><label>To</label><input type="date" id="toDate" /></div>
+      <div id="partyWrap" style="display:none;"><label>Party</label>
+        <select id="partySel"></select>
+      </div>
+      <div id="partyTypeWrap" style="display:none;"><label>Party type</label>
+        <select id="partyType"><option>Customer</option><option>Supplier</option></select>
+      </div>
+      <div style="display:flex;align-items:end;gap:8px;">
+        <button class="btn" id="runBtn" data-loading-text="Running…">Run</button>
+        <button class="btn secondary" id="csvBtn">CSV</button>
+      </div>
+    </div>
+  </div>
+  <div id="reportArea"></div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const ROLES = ['Super Admin', 'Company Admin', 'Accountant', 'Branch Manager', 'Auditor', 'Store Manager'];
+  if (!ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to Reports.</p></div>';
+    return;
+  }
+
+
+  const reports = await api('/reports');
+  const sel = document.getElementById('reportSel');
+  const groups = [...new Set(reports.map(r => r.group))];
+  sel.innerHTML = groups.map(g =>
+    `<optgroup label="${esc(g)}">${reports.filter(r => r.group === g)
+      .map(r => `<option value="${r.key}">${esc(r.name)}</option>`).join('')}</optgroup>`).join('');
+
+  const from = document.getElementById('fromDate');
+  const to = document.getElementById('toDate');
+  to.valueAsDate = new Date();
+  from.valueAsDate = new Date(Date.now() - 30 * 86400000);
+
+  await buildBranchFilter(document.getElementById('branchFilterWrap'), () => {});
+
+  let customers = [], suppliers = [];
+  async function loadParties() {
+    [customers, suppliers] = await Promise.all([api('/masters/customers'), api('/masters/suppliers')]);
+    syncPartyList();
+  }
+  function syncPartyList() {
+    const isCustomer = document.getElementById('partyType').value === 'Customer';
+    const list = isCustomer ? customers : suppliers;
+    document.getElementById('partySel').innerHTML = list.map(p =>
+      `<option value="${isCustomer ? p.CustomerID : p.SupplierID}">${esc(isCustomer ? p.CustomerName : p.SupplierName)}</option>`).join('');
+  }
+  document.getElementById('partyType').addEventListener('change', syncPartyList);
+
+  function currentReport() { return reports.find(r => r.key === sel.value); }
+
+  // Only show the controls a given report actually uses.
+  function syncControls() {
+    const r = currentReport();
+    const showRange = r && r.needsRange;
+    document.getElementById('fromWrap').style.display = showRange ? 'block' : 'none';
+    document.getElementById('toWrap').style.display = showRange ? 'block' : 'none';
+    document.getElementById('partyWrap').style.display = r && r.needsParty ? 'block' : 'none';
+    document.getElementById('partyTypeWrap').style.display = r && r.needsParty ? 'block' : 'none';
+  }
+  sel.addEventListener('change', () => { syncControls(); run(); });
+  syncControls();
+
+  function params() {
+    const r = currentReport();
+    const p = { branchId: selectedBranch() };
+    if (r && r.needsRange) { p.from = from.value; p.to = to.value; }
+    if (r && r.needsParty) {
+      p.partyType = document.getElementById('partyType').value;
+      p.partyId = document.getElementById('partySel').value;
+    }
+    return p;
+  }
+
+  async function run() {
+    const area = document.getElementById('reportArea');
+    area.innerHTML = '<div class="card"><p class="muted">Running…</p></div>';
+    try {
+      const d = await api('/reports/' + sel.value, { params: params() });
+      const money = (c, v) => c.money ? fmtMoney(v) : (v === null || v === undefined ? '' : v);
+
+      // Some reports carry an extra summary the table can't express.
+      let extra = '';
+      if (d.openingCash !== undefined) {
+        extra = `<div class="kpi-grid">
+          <div class="kpi-card"><div class="label">Opening cash</div><div class="value">${fmtMoney(d.openingCash)}</div><div class="sub">before ${fmtDate(d.from)}</div></div>
+          <div class="kpi-card"><div class="label">Cash in</div><div class="value">${fmtMoney(d.totals.Inflow)}</div><div class="sub">over the period</div></div>
+          <div class="kpi-card"><div class="label">Cash out</div><div class="value">${fmtMoney(d.totals.Outflow)}</div><div class="sub">over the period</div></div>
+          <div class="kpi-card"><div class="label">Closing cash</div><div class="value">${fmtMoney(d.closingCash)}</div><div class="sub">as at ${fmtDate(d.to)}</div></div>
+        </div>`;
+      }
+      if (d.byCategory) {
+        extra = `<div class="kpi-grid">
+          ${d.byCategory.map(c => `<div class="kpi-card">
+            <div class="label">${c.category} stock</div>
+            <div class="value">${fmtMoney(c.value)}</div>
+            <div class="sub">${c.items} item${c.items === 1 ? '' : 's'}</div></div>`).join('')}
+        </div>`;
+      }
+
+      area.innerHTML = `
+        ${extra}
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+            <h2 style="margin:0;">${esc(d.title)}</h2>
+            <span class="muted">${d.from ? `${fmtDate(d.from)} – ${fmtDate(d.to)}` : ''} · ${d.rows.length} row${d.rows.length === 1 ? '' : 's'}</span>
+          </div>
+          ${d.note ? `<p class="muted">${esc(d.note)}</p>` : ''}
+          ${d.rows.length === 0 ? '<p class="muted">Nothing to show for these filters.</p>' : `
+          <div style="overflow-x:auto;">
+            <table>
+              <thead><tr>${d.columns.map(c => `<th${c.align ? ` style="text-align:${c.align}"` : ''}>${esc(c.label)}</th>`).join('')}</tr></thead>
+              <tbody>
+                ${d.rows.map(row => `<tr>${d.columns.map(c =>
+                  `<td${c.align ? ` style="text-align:${c.align}"` : ''}>${esc(money(c, row[c.key]))}</td>`).join('')}</tr>`).join('')}
+              </tbody>
+              ${d.totals ? `<tfoot><tr style="font-weight:700;border-top:2px solid var(--border);">
+                ${d.columns.map((c, i) => {
+                  if (d.totals[c.key] !== undefined) return `<td${c.align ? ` style="text-align:${c.align}"` : ''}>${esc(money(c, d.totals[c.key]))}</td>`;
+                  return `<td>${i === 0 ? 'Total' : ''}</td>`;
+                }).join('')}
+              </tr></tfoot>` : ''}
+            </table>
+          </div>`}
+        </div>`;
+      attachHoverEffects();
+    } catch (e) {
+      area.innerHTML = `<div class="card"><p class="error-text">${esc(e.message)}</p></div>`;
+      toast(e.message, 'error');
+    }
+  }
+
+  const runBtn = document.getElementById('runBtn');
+  runBtn.addEventListener('click', withLoading(runBtn, run));
+  document.getElementById('csvBtn').addEventListener('click', async () => {
+    try {
+      await apiDownload(`/reports/${sel.value}/export.csv`, params(), `${sel.value}.csv`);
+      toast('CSV downloaded', 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
+  await loadParties();
+  run();
+})();
+</script>
+</body>
+</html>

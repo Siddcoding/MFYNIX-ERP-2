@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Admins & Access - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('admins');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2 style="margin-top:0;">Admins &amp; Access</h2>
+    <p class="muted" style="margin-top:-6px;">Approve who can sign in, manage the pre-approved email list, and revoke access.</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0;">Pending access requests</h3>
+    <div id="pending"><p class="muted">Loading…</p></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0;">Active &amp; past admins</h3>
+    <div id="admins"><p class="muted">Loading…</p></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0;">Pre-approved emails (allowlist)</h3>
+    <p class="muted" style="margin-top:-6px;">Anyone who signs up with one of these emails is approved automatically.</p>
+    <div class="filter-bar" style="margin-bottom:10px;">
+      <div style="flex:1;"><label>Add an email</label><input id="newEmail" type="email" placeholder="name@company.com" /></div>
+      <div style="align-self:flex-end;"><button class="btn" id="addEmailBtn">Add to allowlist</button></div>
+    </div>
+    <div id="allowlist"><p class="muted">Loading…</p></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const me = Auth.getUser();
+
+  function statusPill(s) {
+    const cls = s === 'Active' ? 'ok' : s === 'Pending' ? 'warn' : '';
+    return `<span class="badge ${cls}">${esc(s)}</span>`;
+  }
+
+  async function loadAll() {
+    let admins = [];
+    try { admins = await api('/auth/admins'); }
+    catch (e) {
+      document.getElementById('pending').innerHTML = `<p class="error-text">${esc(e.message)}</p>`;
+      document.getElementById('admins').innerHTML = '';
+      return;
+    }
+    const pending = admins.filter(a => a.Status === 'Pending');
+    const others = admins.filter(a => a.Status !== 'Pending');
+
+    // Pending
+    const pe = document.getElementById('pending');
+    if (!pending.length) pe.innerHTML = '<p class="muted">No requests waiting.</p>';
+    else pe.innerHTML = `<table><thead><tr><th>Name</th><th>Email</th><th>Requested</th><th></th></tr></thead><tbody>${
+      pending.map(a => `<tr>
+        <td>${esc(a.FullName || '')}</td><td>${esc(a.Email || '')}</td><td>${fmtDate(a.SignupAt)}</td>
+        <td style="white-space:nowrap;">
+          <button class="btn" style="padding:4px 10px;" data-approve="${a.UserID}">Approve</button>
+          <button class="btn secondary" style="padding:4px 10px;" data-reject="${a.UserID}">Decline</button>
+        </td></tr>`).join('')
+    }</tbody></table>`;
+
+    // Active & past
+    const ae = document.getElementById('admins');
+    ae.innerHTML = `<table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead><tbody>${
+      others.map(a => `<tr>
+        <td>${esc(a.FullName || '')}</td><td>${esc(a.Email || '')}</td><td>${esc(a.RoleName)}</td>
+        <td>${statusPill(a.Status)}</td><td>${a.LastLogin ? fmtDate(a.LastLogin) : '<span class="muted">never</span>'}</td>
+        <td style="white-space:nowrap;">${
+          a.UserID === me.userId ? '<span class="muted">you</span>'
+          : a.Status === 'Active' ? `<button class="btn secondary" style="padding:4px 10px;" data-revoke="${a.UserID}">Revoke</button>`
+          : a.Status === 'Rejected' ? `<button class="btn secondary" style="padding:4px 10px;" data-approve="${a.UserID}">Approve</button>`
+          : `<button class="btn secondary" style="padding:4px 10px;" data-approve="${a.UserID}">Reactivate</button>`
+        }</td></tr>`).join('')
+    }</tbody></table>`;
+
+    pe.querySelectorAll('[data-approve]').forEach(b => b.addEventListener('click', () => act(`/auth/admins/${b.dataset.approve}/approve`, 'Approved')));
+    pe.querySelectorAll('[data-reject]').forEach(b => b.addEventListener('click', () => act(`/auth/admins/${b.dataset.reject}/reject`, 'Declined')));
+    ae.querySelectorAll('[data-approve]').forEach(b => b.addEventListener('click', () => act(`/auth/admins/${b.dataset.approve}/approve`, 'Approved')));
+    ae.querySelectorAll('[data-revoke]').forEach(b => b.addEventListener('click', () => {
+      if (confirm('Revoke this admin\'s access? They will not be able to sign in.')) act(`/auth/admins/${b.dataset.revoke}/revoke`, 'Access revoked');
+    }));
+  }
+
+  async function act(url, okMsg) {
+    try { await api(url, { method: 'POST', body: {} }); toast(okMsg, 'success'); loadAll(); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function loadAllowlist() {
+    const el2 = document.getElementById('allowlist');
+    let rows = [];
+    try { rows = await api('/auth/allowlist'); }
+    catch (e) { el2.innerHTML = `<p class="error-text">${esc(e.message)}</p>`; return; }
+    if (!rows.length) { el2.innerHTML = '<p class="muted">No pre-approved emails.</p>'; return; }
+    el2.innerHTML = `<table><thead><tr><th>Email</th><th>Account</th><th>Added</th><th></th></tr></thead><tbody>${
+      rows.map(r => `<tr>
+        <td>${esc(r.Email)}</td>
+        <td>${r.AccountStatus ? statusPill(r.AccountStatus) : '<span class="muted">not signed up</span>'}</td>
+        <td>${fmtDate(r.CreatedAt)}</td>
+        <td><button class="btn secondary" style="padding:4px 10px;" data-del="${r.ID}">Remove</button></td>
+      </tr>`).join('')
+    }</tbody></table>`;
+    el2.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+      try { await api(`/auth/allowlist/${b.dataset.del}`, { method: 'DELETE' }); toast('Removed from allowlist', 'success'); loadAllowlist(); }
+      catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  document.getElementById('addEmailBtn').addEventListener('click', async () => {
+    const email = document.getElementById('newEmail').value.trim();
+    if (!email) return toast('Enter an email', 'error');
+    try {
+      const r = await api('/auth/allowlist', { method: 'POST', body: { email } });
+      document.getElementById('newEmail').value = '';
+      toast(r.activatedPending ? 'Added — a waiting request for this email was approved.' : 'Added to allowlist', 'success');
+      loadAllowlist(); loadAll();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
+  await loadAll();
+  await loadAllowlist();
+})();
+</script>
+</body>
+</html>

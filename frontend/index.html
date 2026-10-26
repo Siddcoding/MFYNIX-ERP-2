@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mfynix ERP - Sign in</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <!-- The product's own lockup. The login screen is the one place that
+           always shows Mfynix rather than a customer's logo: nobody is signed
+           in yet, so the app does not know whose company this is. -->
+      <div class="login-brand"><img src="img/mfynix-logo.png" alt="Mfynix" /></div>
+      <p class="sub" id="cardSub">Smarter ERP. Faster Growth.</p>
+
+      <!-- Step 1: who is signing in. Staff and customers were previously handed
+           the same form even though they use completely different systems. -->
+      <div id="paneChoose" class="login-pane">
+        <div class="chooser">
+          <button type="button" class="chooser-card" data-mode="admin">
+            <span class="chooser-icon">🛠️</span>
+            <span>
+              <span class="chooser-title">Admin / Staff</span>
+              <span class="chooser-sub">Full ERP — sales, purchase, stock, accounts, GST, payroll.</span>
+            </span>
+            <span class="chooser-arrow">&rsaquo;</span>
+          </button>
+          <button type="button" class="chooser-card" data-mode="customer">
+            <span class="chooser-icon">👤</span>
+            <span>
+              <span class="chooser-title">Customer</span>
+              <span class="chooser-sub">Your invoices, payments, outstanding balance and statement.</span>
+            </span>
+            <span class="chooser-arrow">&rsaquo;</span>
+          </button>
+        </div>
+      </div>
+      </div>
+
+      <!-- Step 2a: staff sign-in -->
+      <div id="paneAdmin" class="login-pane" style="display:none;">
+        <button type="button" class="back-link" data-back>&larr; Back</button>
+        <div class="mode-badge">🛠️ Admin / Staff</div>
+        <form id="adminForm">
+          <div class="field">
+            <label for="email">Email address</label>
+            <input id="email" name="email" type="email" autocomplete="username" placeholder="you@company.com" required />
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="rememberMe" />
+            <span>Remember me on this device</span>
+          </label>
+          <div class="aux-row" style="display:flex;justify-content:space-between;gap:10px;">
+            <a href="signup.html">Request admin access</a>
+            <a href="forgot-password.html">Forgot password?</a>
+          </div>
+          <button class="btn" type="submit" id="loginBtn" data-loading-text="Signing in…">Sign in to the ERP</button>
+        </form>
+      </div>
+
+      <!-- Forced first-sign-in password change (ROL-01) -->
+      <div id="paneSetPw" class="login-pane" style="display:none;">
+        <div class="mode-badge">🔐 Set a new password</div>
+        <p style="font-size:13px;opacity:.85;margin:6px 0 12px;">Your password was set by an administrator or at installation. Choose your own before continuing.</p>
+        <form id="setPwForm">
+          <div class="field"><label for="spCurrent">Current password</label>
+            <input id="spCurrent" type="password" autocomplete="current-password" required /></div>
+          <div class="field"><label for="spNew">New password (at least 8 characters)</label>
+            <input id="spNew" type="password" autocomplete="new-password" minlength="8" required /></div>
+          <div class="field"><label for="spConfirm">Confirm new password</label>
+            <input id="spConfirm" type="password" autocomplete="new-password" minlength="8" required /></div>
+          <button class="btn" type="submit" id="spBtn" data-loading-text="Saving…">Save and continue</button>
+        </form>
+      </div>
+
+      <!-- Step 2b: customer sign-in. The identifier is the customer's email,
+           because that is the one thing they already know about themselves. -->
+      <div id="paneCustomer" class="login-pane" style="display:none;">
+        <button type="button" class="back-link" data-back>&larr; Back</button>
+        <div class="mode-badge">👤 Customer</div>
+        <form id="customerForm">
+          <div class="field">
+            <label for="custEmail">Email address</label>
+            <input id="custEmail" type="email" autocomplete="username" placeholder="you@company.com" required />
+          </div>
+          <div class="field">
+            <label for="custPassword">Password</label>
+            <input id="custPassword" type="password" autocomplete="current-password" placeholder="••••••••" required />
+          </div>
+          <div class="field" id="custCompanyField" style="display:none;">
+            <label for="custCompany">Company</label>
+            <select id="custCompany"></select>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="custRemember" />
+            <span>Remember me on this device</span>
+          </label>
+          <button class="btn" type="submit" id="custLoginBtn" data-loading-text="Signing in…">Sign in to my account</button>
+        </form>
+        <div class="login-hint">
+          Portal access is switched on by your account manager. If you do not have a
+          password yet, ask them to enable it against your customer record.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/common.js"></script>
+  <script>
+    initAuroraBackground();
+    initRipples();
+
+    // Already signed in? Go where this kind of account belongs.
+    const forcedChange = new URLSearchParams(window.location.search).get('mustchange') === '1';
+    if (Auth.getToken() && !forcedChange) {
+      const existing = Auth.getUser();
+      window.location.href = (existing && existing.kind === 'customer') ? 'portal.html' : 'dashboard.html';
+    }
+
+    const panes = {
+      choose: document.getElementById('paneChoose'),
+      admin: document.getElementById('paneAdmin'),
+      setpw: document.getElementById('paneSetPw'),
+      customer: document.getElementById('paneCustomer')
+    };
+    const SUBS = {
+      choose: 'Smarter ERP. Faster Growth.',
+      admin: 'Sign in to the full ERP',
+      setpw: 'Choose a new password to continue',
+      customer: 'Sign in to your customer account'
+    };
+
+    function showPane(name, { back = false } = {}) {
+      Object.entries(panes).forEach(([key, node]) => { node.style.display = key === name ? '' : 'none'; });
+      const pane = panes[name];
+      pane.classList.remove('login-pane', 'back');
+      void pane.offsetWidth;                    // restart the slide-in animation
+      pane.classList.add('login-pane');
+      if (back) pane.classList.add('back');
+      document.getElementById('cardSub').textContent = SUBS[name];
+      // The chooser remembers itself, so a customer isn't asked twice a day
+      // which kind of person they are.
+      try {
+        if (name === 'choose') localStorage.removeItem('mf_login_mode');
+        else localStorage.setItem('mf_login_mode', name);
+      } catch (e) { /* private mode - it just won't be remembered */ }
+      const firstInput = pane.querySelector('input');
+      if (firstInput && !firstInput.value) setTimeout(() => firstInput.focus(), 60);
+      else if (firstInput) setTimeout(() => pane.querySelectorAll('input')[1].focus(), 60);
+    }
+
+    document.querySelectorAll('[data-mode]').forEach(card => {
+      card.addEventListener('click', () => showPane(card.dataset.mode));
+    });
+    document.querySelectorAll('[data-back]').forEach(btn => {
+      btn.addEventListener('click', () => showPane('choose', { back: true }));
+    });
+
+    // Remember me: prefill the saved username, independent of the session
+    // itself, which is governed by the JWT's own expiry.
+    const rememberedUsername = localStorage.getItem('mf_remembered_admin_email');
+    if (rememberedUsername) {
+      document.getElementById('email').value = rememberedUsername;
+      document.getElementById('rememberMe').checked = true;
+    }
+    const rememberedEmail = localStorage.getItem('mf_remembered_email');
+    if (rememberedEmail) {
+      document.getElementById('custEmail').value = rememberedEmail;
+      document.getElementById('custRemember').checked = true;
+    }
+
+    // ?mode=admin / ?mode=customer skips the chooser, so a company can hand its
+    // customers a bookmark that lands them straight on their own form. Failing
+    // that, whichever pane was used last on this device.
+    const urlMode = new URLSearchParams(window.location.search).get('mode');
+    const lastMode = urlMode || localStorage.getItem('mf_login_mode');
+    if (forcedChange && Auth.getToken()) showPane('setpw');
+    else if (lastMode === 'admin' || lastMode === 'customer') showPane(lastMode);
+
+    function shake(pane) {
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      pane.classList.remove('shake');
+      void pane.offsetWidth;
+      pane.classList.add('shake');
+    }
+
+    // ---- Staff sign-in ----
+    const loginBtn = document.getElementById('loginBtn');
+    document.getElementById('adminForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(loginBtn, async () => {
+        try {
+          const email = document.getElementById('email').value.trim();
+          const password = document.getElementById('password').value;
+          const rememberMe = document.getElementById('rememberMe').checked;
+          const data = await api('/auth/login', { method: 'POST', body: { email, password, rememberMe } });
+          Auth.setSession(data.token, data.user);
+
+          if (rememberMe) localStorage.setItem('mf_remembered_admin_email', email);
+          else localStorage.removeItem('mf_remembered_admin_email');
+
+          if (data.user.mustChangePassword) {
+            document.getElementById('spCurrent').value = password;
+            showPane('setpw');
+            toast('Please choose a new password before continuing.', 'info');
+            return;
+          }
+          toast(`Welcome back, ${data.user.fullName || data.user.userName}`, 'success', 1500);
+          setTimeout(() => { window.location.href = 'dashboard.html'; }, 350);
+        } catch (err) {
+          shake(panes.admin);
+          toast(err.message, 'error');
+        }
+      })();
+    });
+
+    // ---- Forced password change ----
+    document.getElementById('setPwForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(document.getElementById('spBtn'), async () => {
+        const cur = document.getElementById('spCurrent').value;
+        const nw = document.getElementById('spNew').value;
+        if (nw !== document.getElementById('spConfirm').value) return toast('The two new passwords do not match.', 'error');
+        try {
+          await api('/auth/change-password', { method: 'POST', body: { currentPassword: cur, newPassword: nw } });
+          const u = Auth.getUser(); if (u) { u.mustChangePassword = false; Auth.setSession(Auth.getToken(), u); }
+          toast('Password changed. Welcome!', 'success', 1500);
+          setTimeout(() => { window.location.href = 'dashboard.html'; }, 350);
+        } catch (err) { toast(err.message, 'error'); }
+      })();
+    });
+
+    // ---- Customer sign-in ----
+    const custBtn = document.getElementById('custLoginBtn');
+    document.getElementById('customerForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(custBtn, async () => {
+        const email = document.getElementById('custEmail').value.trim();
+        const password = document.getElementById('custPassword').value;
+        const rememberMe = document.getElementById('custRemember').checked;
+        const companySel = document.getElementById('custCompany');
+        const companyId = companySel.value || undefined;
+        try {
+          const data = await api('/portal/login', { method: 'POST', body: { email, password, companyId, rememberMe } });
+          Auth.setSession(data.token, data.customer);
+
+          if (rememberMe) localStorage.setItem('mf_remembered_email', email);
+          else localStorage.removeItem('mf_remembered_email');
+
+          toast(`Welcome, ${esc(data.customer.customerName)}`, 'success', 1500);
+          setTimeout(() => { window.location.href = 'portal.html'; }, 350);
+        } catch (err) {
+          // Two cases worth handling specially. An expired access is not a
+          // failed login, so it should not shake the form like a wrong
+          // password - it needs reading, and it stays on screen.
+          if (/expired/i.test(err.message)) {
+            const box = document.createElement('div');
+            box.className = 'access-banner urgent';
+            box.style.marginTop = '14px';
+            box.textContent = err.message;
+            const existing = panes.customer.querySelector('.access-banner');
+            if (existing) existing.remove();
+            panes.customer.appendChild(box);
+            toast(err.message, 'error', 8000);
+            return;
+          }
+          // The same email exists under more than one company, so ask which
+          // rather than guessing.
+          if (/more than one company/i.test(err.message)) {
+            try {
+              const companies = await api('/auth/companies');
+              companySel.innerHTML = companies.map(c => `<option value="${esc(c.CompanyID)}">${esc(c.CompanyName)}</option>`).join('');
+              document.getElementById('custCompanyField').style.display = '';
+            } catch (e2) { /* the field just stays hidden */ }
+          } else {
+            shake(panes.customer);
+          }
+          toast(err.message, 'error');
+        }
+      })();
+    });
+  </script>
+</body>
+</html>

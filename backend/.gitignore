@@ -1,0 +1,4 @@
+node_modules/
+db/mfintech.db
+db/mfintech.db-*
+.env

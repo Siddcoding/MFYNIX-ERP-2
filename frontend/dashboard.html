@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dashboard - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script src="js/vendor/chart.min.js"></script>
+<script>
+Auth.requireLogin();
+renderShell('dashboard');
+</script>
+
+<template id="tpl">
+  <div id="branchFilterWrap" style="margin-bottom:16px;"></div>
+  <div class="kpi-grid" id="kpiGrid"></div>
+
+  <div class="card">
+    <h2>Sales &amp; Purchase Trend (Last 14 Days)</h2>
+    <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:0;" id="flowRow">
+    <div class="card" style="margin-right:20px;">
+      <h2>Cash Flow — Purchase → Stock → Sales → GST</h2>
+      <div id="sankeyHolder"></div>
+    </div>
+    <div class="card">
+      <h2>Today's Contribution</h2>
+      <div style="display:flex;justify-content:center;padding:8px 0;" id="radialHolder"></div>
+      <p class="muted" style="text-align:center;font-size:0.82rem;margin-top:6px;">Today's sales as a share of this month's total</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 id="perfTitle">Branch Performance (This Month)</h2>
+    <div id="branchPerfTable"></div>
+  </div>
+
+  <div class="card">
+    <h2>Recent Transactions</h2>
+    <div id="recentTable"></div>
+  </div>
+
+  <div class="card">
+    <h2>Top Customers</h2>
+    <div id="topCustomersTable"></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+
+  // Stack the flow row on narrow screens
+  if (window.innerWidth < 860) {
+    document.getElementById('flowRow').style.gridTemplateColumns = '1fr';
+    document.querySelector('#flowRow .card').style.marginRight = '0';
+  }
+
+  // Head-office (branchId === null) users get a branch filter dropdown
+  if (!user.branchId) {
+    const branches = await api('/branches');
+    const wrap = document.getElementById('branchFilterWrap');
+    const select = el(`
+      <select id="branchFilter" style="max-width:280px;">
+        <option value="">All Branches (Consolidated)</option>
+        ${branches.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('')}
+      </select>
+    `);
+    wrap.appendChild(select);
+    select.addEventListener('change', () => refreshAll(select.value || undefined));
+  }
+
+  async function loadKpis(branchId) {
+    const kpis = await api('/dashboard/kpis', { params: { branchId } });
+    const grid = document.getElementById('kpiGrid');
+    grid.innerHTML = '';
+    const cards = [
+      ["Today's Sales", kpis.todaySales],
+      ['Monthly Sales', kpis.monthlySales],
+      ["Today's Purchase", kpis.todayPurchase],
+      ['Stock Value', kpis.stockValue],
+      ['GST Payable (Net)', kpis.gstPayable],
+    ];
+    cards.forEach(([label, value], i) => {
+      const card = el(`<div class="kpi-card" style="animation-delay:${i * 0.05}s"><div class="label">${label}</div><div class="value" data-target="${value}">₹0</div></div>`);
+      grid.appendChild(card);
+      animateCounter(card.querySelector('.value'), value, (v) => fmtMoney(v));
+    });
+    attachHoverEffects();
+
+    // Radial gauge: today's sales as a % of monthly sales
+    const pct = kpis.monthlySales > 0 ? Math.min(100, (kpis.todaySales / kpis.monthlySales) * 100) : 0;
+    const radialHolder = document.getElementById('radialHolder');
+    radialHolder.innerHTML = radialProgressSvg(pct, { size: 132, stroke: 11, label: 'of month' });
+    animateRadialProgress(radialHolder);
+
+    // Mini sankey: Purchase -> Stock -> Sales -> GST
+    const sankeyHolder = document.getElementById('sankeyHolder');
+    sankeyHolder.innerHTML = miniSankeySvg({
+      purchase: kpis.monthlyPurchase,
+      sales: kpis.monthlySales,
+      gst: kpis.gstCollected
+    });
+  }
+
+  let trendChartInstance = null;
+  async function loadTrend(branchId) {
+    const days = await api('/dashboard/trend', { params: { branchId } });
+    const ctx = document.getElementById('trendChart').getContext('2d');
+    const labels = days.map(d => new Date(d.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }));
+    const salesData = days.map(d => d.sales);
+    const purchaseData = days.map(d => d.purchase);
+
+    const salesGradient = ctx.createLinearGradient(0, 0, 0, 220);
+    salesGradient.addColorStop(0, 'rgba(37,99,235,0.35)');
+    salesGradient.addColorStop(1, 'rgba(37,99,235,0.02)');
+    const purchaseGradient = ctx.createLinearGradient(0, 0, 0, 220);
+    purchaseGradient.addColorStop(0, 'rgba(124,92,255,0.28)');
+    purchaseGradient.addColorStop(1, 'rgba(124,92,255,0.02)');
+
+    if (trendChartInstance) trendChartInstance.destroy();
+    trendChartInstance = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Sales', data: salesData, borderColor: '#2563eb', backgroundColor: salesGradient, fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2.5 },
+          { label: 'Purchase', data: purchaseData, borderColor: '#7c5cff', backgroundColor: purchaseGradient, fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2.5 },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: { duration: 900, easing: 'easeOutCubic' },
+        plugins: { legend: { display: true, position: 'top', align: 'end', labels: { boxWidth: 10, usePointStyle: true, font: { size: 11 }, color: '#93a0b4' } } },
+        scales: {
+          x: { grid: { display: false }, ticks: { font: { size: 10 }, color: '#93a0b4' } },
+          y: { grid: { color: 'rgba(255,255,255,0.08)' }, ticks: { font: { size: 10 }, color: '#93a0b4', callback: (v) => '₹' + v.toLocaleString('en-IN') } }
+        },
+        interaction: { intersect: false, mode: 'index' }
+      }
+    });
+  }
+
+  async function loadBranchPerformance() {
+    const rows = await api('/dashboard/branch-performance');
+    const el2 = document.getElementById('branchPerfTable');
+    if (rows.length === 0) { el2.innerHTML = '<p class="muted">No data yet.</p>'; return; }
+    el2.innerHTML = `
+      <table>
+        <thead><tr><th>Branch</th><th>Monthly Sales</th><th>Monthly Purchase</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr><td>${esc(r.BranchName)}</td><td>${fmtMoney(r.MonthlySales)}</td><td>${fmtMoney(r.MonthlyPurchase)}</td></tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  async function loadRecent(branchId) {
+    const rows = await api('/dashboard/recent-transactions', { params: { branchId } });
+    const target = document.getElementById('recentTable');
+    if (rows.length === 0) { target.innerHTML = '<p class="muted">No transactions yet.</p>'; return; }
+    target.innerHTML = `
+      <table>
+        <thead><tr><th>Type</th><th>Ref No</th><th>Date</th><th>Amount</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr><td><span class="badge ${r.Type === 'Sale' ? 'ok' : 'warn'}">${esc(r.Type)}</span></td><td>${esc(r.RefNo)}</td><td>${fmtDate(r.Date)}</td><td>${fmtMoney(r.Amount)}</td></tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  async function loadTopCustomers(branchId) {
+    const rows = await api('/dashboard/top-customers', { params: { branchId } });
+    const target = document.getElementById('topCustomersTable');
+    if (rows.length === 0) { target.innerHTML = '<p class="muted">No sales yet.</p>'; return; }
+    target.innerHTML = `
+      <table>
+        <thead><tr><th>Customer</th><th>Total Business</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${esc(r.CustomerName)}</td><td>${fmtMoney(r.Total)}</td></tr>`).join('')}</tbody>
+      </table>`;
+  }
+
+  async function refreshAll(branchId) {
+    await Promise.all([loadKpis(branchId), loadTrend(branchId), loadRecent(branchId), loadTopCustomers(branchId)]);
+  }
+
+  try {
+    await refreshAll(user.branchId || undefined);
+    if (!user.branchId) {
+      document.getElementById('perfTitle').style.display = 'block';
+      await loadBranchPerformance();
+    } else {
+      document.getElementById('perfTitle').parentElement.style.display = 'none';
+    }
+  } catch (e) {
+    content.innerHTML = `<p class="error-text">${esc(e.message)}</p>`;
+    toast(e.message, 'error');
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Payroll - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('payroll');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Payroll</h2>
+    <p class="muted">Salaries are calculated from each employee's structure and that month's attendance, then posted straight into the books as a balanced journal entry.</p>
+    <div class="form-grid" style="margin-top:14px;">
+      <div><label>Period</label><input type="month" id="periodInput" /></div>
+      <div id="branchFilterWrap"></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;" id="tabBar"></div>
+  </div>
+  <div id="tabContent"></div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const PAYROLL_ROLES = ['Super Admin', 'Company Admin', 'Accountant', 'Branch Manager', 'Auditor'];
+  if (!PAYROLL_ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to Payroll.</p></div>';
+    return;
+  }
+  const canWrite = user.role !== 'Auditor';
+
+  const periodInput = document.getElementById('periodInput');
+  periodInput.value = currentPeriod();
+  periodInput.addEventListener('change', render);
+
+  let branches = await buildBranchFilter(document.getElementById('branchFilterWrap'), render);
+
+  const TABS = ['Employees', 'Attendance', 'Run Payroll', 'Payroll History', 'Statutory'];
+  let activeTab = 'Employees';
+  buildTabBar(document.getElementById('tabBar'), TABS, activeTab, (t) => { activeTab = t; render(); });
+
+  function period() { return periodInput.value; }
+  // Payroll is always run for exactly one branch. A branch user has theirs;
+  // a head-office user must pick one, since "all branches at once" would hide
+  // which branch a salary belongs to in the accounts.
+  function activeBranchId() { return user.branchId || selectedBranch(); }
+
+  async function render() {
+    const target = document.getElementById('tabContent');
+    target.innerHTML = '<div class="card"><p class="muted">Loading…</p></div>';
+    try {
+      if (activeTab === 'Employees') await renderEmployees(target);
+      else if (activeTab === 'Attendance') await renderAttendance(target);
+      else if (activeTab === 'Run Payroll') await renderRun(target);
+      else if (activeTab === 'Payroll History') await renderHistory(target);
+      else if (activeTab === 'Statutory') await renderStatutory(target);
+      attachHoverEffects();
+    } catch (e) {
+      target.innerHTML = `<div class="card"><p class="error-text">${esc(e.message)}</p></div>`;
+      toast(e.message, 'error');
+    }
+  }
+
+  // ---------------- Employees ----------------
+  async function renderEmployees(target) {
+    const employees = await api('/payroll/employees', { params: { branchId: selectedBranch() } });
+    target.innerHTML = `
+      ${canWrite ? `
+      <div class="card">
+        <h2>Add an employee</h2>
+        <form id="empForm">
+          <div class="form-grid">
+            ${user.branchId ? '' : `<div><label>Branch *</label><select name="branchId" required>${branches.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('')}</select></div>`}
+            <div><label>Full name *</label><input name="fullName" required /></div>
+            <div><label>Designation</label><input name="designation" /></div>
+            <div><label>Department</label><input name="department" /></div>
+            <div><label>Mobile</label><input name="mobile" /></div>
+            <div><label>PAN</label><input name="pan" /></div>
+            <div><label>Date of joining</label><input name="dateOfJoining" type="date" /></div>
+            <div><label>Basic salary *</label><input name="basic" type="number" step="0.01" min="1" required /></div>
+            <div><label>HRA</label><input name="hra" type="number" step="0.01" value="0" /></div>
+            <div><label>Other allowances</label><input name="allowances" type="number" step="0.01" value="0" /></div>
+            <div><label>Monthly TDS</label><input name="monthlyTDS" type="number" step="0.01" value="0" /></div>
+            <div><label>Bank account</label><input name="bankAccount" /></div>
+          </div>
+          <div class="checkbox-row" style="margin-top:12px;">
+            <label><input type="checkbox" name="pfApplicable" checked /> PF applicable</label>
+            <label><input type="checkbox" name="esiApplicable" checked /> ESI applicable</label>
+          </div>
+          <button class="btn" type="submit" data-loading-text="Saving…" style="margin-top:14px;">Add employee</button>
+        </form>
+      </div>` : ''}
+
+      <div class="card">
+        <h2>Employees (${employees.length})</h2>
+        ${renderTable(employees.map(e => ({
+          Code: e.EmpCode, Name: e.FullName, Designation: e.Designation || '—', Branch: e.BranchName,
+          Basic: fmtMoney(e.Basic), HRA: fmtMoney(e.HRA), Allowances: fmtMoney(e.Allowances),
+          'CTC / month': fmtMoney(e.Basic + e.HRA + e.Allowances),
+          Statutory: [e.PFApplicable ? 'PF' : null, e.ESIApplicable ? 'ESI' : null, e.MonthlyTDS > 0 ? 'TDS' : null].filter(Boolean).join(', ') || '—'
+        })), null, 'No employees yet. Add one above to get started.')}
+      </div>`;
+
+    const form = document.getElementById('empForm');
+    if (form) {
+      const submit = form.querySelector('button[type=submit]');
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        withLoading(submit, async () => {
+          const fd = new FormData(form);
+          const body = Object.fromEntries(fd.entries());
+          body.pfApplicable = form.pfApplicable.checked;
+          body.esiApplicable = form.esiApplicable.checked;
+          try {
+            await api('/payroll/employees', { method: 'POST', body });
+            toast(`${esc(body.fullName)} added`, 'success');
+            showSuccessBurst('Employee added');
+            render();
+          } catch (err) { toast(err.message, 'error'); }
+        })();
+      });
+    }
+  }
+
+  // ---------------- Attendance ----------------
+  async function renderAttendance(target) {
+    const rows = await api('/payroll/attendance', { params: { period: period(), branchId: selectedBranch() } });
+    target.innerHTML = `
+      <div class="card">
+        <h2>Attendance — ${period()}</h2>
+        <p class="muted">Present days drive pro-rata pay. Overtime is paid at the employee's hourly basic rate (monthly basic ÷ 208 hours).</p>
+        ${rows.length === 0 ? '<p class="muted">No employees to record attendance for.</p>' : `
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Code</th><th>Name</th><th>Branch</th><th>Working days</th><th>Present days</th><th>Leave</th><th>Overtime hrs</th></tr></thead>
+            <tbody>
+              ${rows.map(r => `
+                <tr data-emp="${esc(r.EmployeeID)}">
+                  <td>${esc(r.EmpCode)}</td><td>${esc(r.FullName)}</td><td>${esc(r.BranchName)}</td>
+                  <td><input type="number" step="0.5" min="1" max="31" value="${esc(r.WorkingDays)}" data-f="workingDays" style="width:90px;" ${canWrite ? '' : 'disabled'} /></td>
+                  <td><input type="number" step="0.5" min="0" max="31" value="${esc(r.PresentDays)}" data-f="presentDays" style="width:90px;" ${canWrite ? '' : 'disabled'} /></td>
+                  <td><input type="number" step="0.5" min="0" value="${esc(r.LeaveDays)}" data-f="leaveDays" style="width:90px;" ${canWrite ? '' : 'disabled'} /></td>
+                  <td><input type="number" step="0.5" min="0" value="${esc(r.OvertimeHours)}" data-f="overtimeHours" style="width:90px;" ${canWrite ? '' : 'disabled'} /></td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${canWrite ? '<button class="btn" id="saveAtt" data-loading-text="Saving…" style="margin-top:14px;">Save attendance</button>' : ''}`}
+      </div>`;
+
+    const btn = document.getElementById('saveAtt');
+    if (btn) btn.addEventListener('click', withLoading(btn, async () => {
+      const payload = [...target.querySelectorAll('tr[data-emp]')].map(tr => {
+        const get = (f) => Number(tr.querySelector(`[data-f="${f}"]`).value);
+        return { employeeId: Number(tr.dataset.emp), workingDays: get('workingDays'), presentDays: get('presentDays'), leaveDays: get('leaveDays'), overtimeHours: get('overtimeHours') };
+      });
+      try {
+        await api('/payroll/attendance', { method: 'POST', body: { period: period(), rows: payload } });
+        toast('Attendance saved', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  // ---------------- Run payroll ----------------
+  async function renderRun(target) {
+    const branchId = activeBranchId();
+    if (!branchId) {
+      target.innerHTML = '<div class="card"><p class="muted">Pick a branch above. Payroll runs one branch at a time, so each branch\'s salary cost lands in its own accounts.</p></div>';
+      return;
+    }
+    const d = await api('/payroll/preview', { params: { period: period(), branchId } });
+
+    target.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="label">Employees</div><div class="value">${d.employeeCount}</div><div class="sub">on this branch's roll</div></div>
+        <div class="kpi-card"><div class="label">Gross</div><div class="value" data-count="${d.totals.gross}"></div><div class="sub">before deductions</div></div>
+        <div class="kpi-card"><div class="label">Deductions</div><div class="value" data-count="${d.totals.deductions}"></div><div class="sub">PF ${fmtMoney(d.totals.pf)} · ESI ${fmtMoney(d.totals.esi)} · TDS ${fmtMoney(d.totals.tds)}</div></div>
+        <div class="kpi-card"><div class="label">Net payable</div><div class="value" data-count="${d.totals.netPay}"></div><div class="sub">to be paid to staff</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Payslip preview — ${period()}</h2>
+        ${d.alreadyPosted
+          ? `<p class="muted"><span class="badge ok">Already posted</span> Payroll for this branch and period has been run (status: ${esc(d.alreadyPosted.Status)}). Open Payroll History to view the payslips.</p>`
+          : '<p class="muted">Nothing is saved until you post the run. Posting writes the payslips and the accounting entry together.</p>'}
+        ${renderTable(d.payslips.map(p => ({
+          Code: p.empCode, Name: p.fullName, Days: `${p.presentDays}/${p.workingDays}`,
+          Basic: fmtMoney(p.basic), HRA: fmtMoney(p.hra), Allow: fmtMoney(p.allowances), OT: fmtMoney(p.overtime),
+          Gross: fmtMoney(p.gross), PF: fmtMoney(p.pf), ESI: fmtMoney(p.esi), TDS: fmtMoney(p.tds), Net: fmtMoney(p.netPay)
+        })), null, 'This branch has no active employees.')}
+        ${canWrite && !d.alreadyPosted && d.employeeCount > 0
+          ? '<button class="btn" id="postRun" data-loading-text="Posting…" style="margin-top:14px;">Post payroll for ' + period() + '</button>'
+          : ''}
+      </div>
+
+      <div class="card">
+        <h2>What posting does to the books</h2>
+        <p class="muted">One balanced journal entry, in the same database transaction as the payslips — so payroll can never exist without its accounting effect.</p>
+        ${renderTable([
+          { Account: 'Salaries & Wages (expense)', debit: d.totals.gross, credit: 0 },
+          { Account: 'PF Payable', debit: 0, credit: d.totals.pf },
+          { Account: 'ESI Payable', debit: 0, credit: d.totals.esi },
+          { Account: 'TDS Payable', debit: 0, credit: d.totals.tds },
+          { Account: 'Salaries Payable', debit: 0, credit: d.totals.netPay }
+        ].filter(r => r.debit > 0 || r.credit > 0)   // zero lines aren't posted, so don't show them
+         .map(r => ({ Account: r.Account, Debit: r.debit ? fmtMoney(r.debit) : '', Credit: r.credit ? fmtMoney(r.credit) : '' })),
+          [{ key: 'Account', label: 'Account' }, { key: 'Debit', label: 'Debit', align: 'right' }, { key: 'Credit', label: 'Credit', align: 'right' }])}
+      </div>`;
+
+    target.querySelectorAll('.kpi-card .value[data-count]').forEach(n => animateCounter(n, Number(n.dataset.count), fmtMoney));
+
+    const btn = document.getElementById('postRun');
+    if (btn) btn.addEventListener('click', withLoading(btn, async () => {
+      try {
+        const r = await api('/payroll/run', { method: 'POST', body: { period: period(), branchId } });
+        toast(`Payroll posted — ${r.employeeCount} payslips, ${fmtMoney(r.netTotal)} net`, 'success');
+        showSuccessBurst('Payroll posted');
+        render();
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  // ---------------- History ----------------
+  async function renderHistory(target) {
+    const runs = await api('/payroll/runs', { params: { branchId: selectedBranch() } });
+    target.innerHTML = `
+      <div class="card">
+        <h2>Payroll history</h2>
+        ${renderTable(runs.map(r => ({
+          Period: r.Period, Branch: `${esc(r.BranchName)} (${esc(r.BranchCode)})`, Employees: r.EmployeeCount,
+          Gross: fmtMoney(r.GrossTotal), Deductions: fmtMoney(r.DeductionTotal), Net: fmtMoney(r.NetTotal),
+          Status: r.Status === 'Paid' ? '<span class="badge ok">Paid</span>' : '<span class="badge warn">Posted, unpaid</span>',
+          Actions: `<button class="btn secondary" data-view="${esc(r.PayrollRunID)}" style="padding:6px 12px;">Payslips</button>` +
+                   (canWrite && r.Status !== 'Paid' ? ` <button class="btn" data-pay="${esc(r.PayrollRunID)}" style="padding:6px 12px;">Mark paid</button>` : '')
+        })), [
+          { key: 'Period', label: 'Period' }, { key: 'Branch', label: 'Branch' }, { key: 'Employees', label: 'Staff', align: 'right' },
+          { key: 'Gross', label: 'Gross', align: 'right' }, { key: 'Deductions', label: 'Deductions', align: 'right' },
+          { key: 'Net', label: 'Net', align: 'right' },
+          { key: 'Status', label: 'Status', render: r => r.Status },
+          { key: 'Actions', label: '', render: r => r.Actions }
+        ], 'No payroll has been posted yet.')}
+      </div>`;
+
+    target.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => viewPayslips(b.dataset.view)));
+    target.querySelectorAll('[data-pay]').forEach(b => b.addEventListener('click', withLoading(b, async () => {
+      try {
+        await api(`/payroll/runs/${b.dataset.pay}/pay`, { method: 'POST', body: {} });
+        toast('Marked as paid — Salaries Payable cleared against Bank', 'success');
+        render();
+      } catch (e) { toast(e.message, 'error'); }
+    })));
+  }
+
+  async function viewPayslips(runId) {
+    try {
+      const d = await api(`/payroll/runs/${runId}`);
+      openModal(`Payslips — ${esc(d.run.BranchName)}, ${esc(d.run.Period)}`, renderTable(d.payslips.map(p => ({
+        Code: p.EmpCode, Name: p.FullName, Days: `${esc(p.PresentDays)}/${esc(p.WorkingDays)}`,
+        Gross: fmtMoney(p.Gross), PF: fmtMoney(p.PF), ESI: fmtMoney(p.ESI), TDS: fmtMoney(p.TDS), Net: fmtMoney(p.NetPay)
+      }))) + '<button class="btn secondary" onclick="closeModal()" style="margin-top:14px;">Close</button>');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ---------------- Statutory ----------------
+  async function renderStatutory(target) {
+    const rows = await api('/payroll/statutory', { params: { period: period(), branchId: selectedBranch() } });
+    const t = rows.reduce((a, r) => ({ pf: a.pf + r.PF, esi: a.esi + r.ESI, tds: a.tds + r.TDS }), { pf: 0, esi: 0, tds: 0 });
+    target.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="label">PF payable</div><div class="value" data-count="${t.pf}"></div><div class="sub">to EPFO</div></div>
+        <div class="kpi-card"><div class="label">ESI payable</div><div class="value" data-count="${t.esi}"></div><div class="sub">to ESIC</div></div>
+        <div class="kpi-card"><div class="label">TDS payable</div><div class="value" data-count="${t.tds}"></div><div class="sub">to Income Tax</div></div>
+      </div>
+      <div class="card">
+        <h2>Statutory register — ${period()}</h2>
+        <p class="muted">What has to be deposited for this month, branch by branch.</p>
+        ${renderTable(rows.map(r => ({
+          Branch: `${esc(r.BranchName)} (${esc(r.BranchCode)})`, Employees: r.Employees, Gross: fmtMoney(r.Gross),
+          PF: fmtMoney(r.PF), ESI: fmtMoney(r.ESI), TDS: fmtMoney(r.TDS), 'Net paid': fmtMoney(r.NetPay)
+        })), null, 'No payroll posted for this period.')}
+      </div>`;
+    target.querySelectorAll('.kpi-card .value[data-count]').forEach(n => animateCounter(n, Number(n.dataset.count), fmtMoney));
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

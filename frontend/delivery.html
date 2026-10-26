@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Delivery - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('delivery');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Deliveries</h2>
+    <p class="muted" style="margin-top:-6px;">Issue goods against a sales order — full or partial — and raise the tax invoice at the same time.</p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0;">Open sales orders</h3>
+    <div id="openOrders"><p class="muted">Loading…</p></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0;">Recent deliveries</h3>
+    <div id="deliveryList"><p class="muted">Loading…</p></div>
+  </div>
+</template>
+
+<div id="delModal" class="modal-backdrop" style="display:none;">
+  <div class="modal">
+    <h3 id="delTitle">Deliver order</h3>
+    <div id="delBody"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <button class="btn secondary" id="delClose">Cancel</button>
+      <button class="btn" id="delGo">Deliver</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+
+  async function loadOrders() {
+    const wrap = document.getElementById('openOrders');
+    let orders;
+    try { orders = await api('/orders/orders'); }
+    catch (e) { wrap.innerHTML = `<p class="error-text">${esc(e.message)}</p>`; return; }
+    const open = orders.filter(o => ['Open', 'Partly delivered'].includes(o.Status));
+    if (!open.length) { wrap.innerHTML = '<p class="muted">No orders waiting to be delivered.</p>'; return; }
+    wrap.innerHTML = `<table><thead><tr><th>Order No</th><th>Date</th><th>Customer</th><th>Status</th><th></th></tr></thead><tbody>${
+      open.map(o => `<tr>
+        <td>${esc(o.OrderNo)}</td><td>${fmtDate(o.OrderDate)}</td><td>${esc(o.CustomerName)}</td>
+        <td><span class="badge">${esc(o.Status)}</span></td>
+        <td><button class="btn secondary" style="padding:4px 10px;" data-deliver="${o.OrderID}">Deliver…</button></td></tr>`).join('')
+    }</tbody></table>`;
+    wrap.querySelectorAll('[data-deliver]').forEach(b => b.addEventListener('click', () => openDeliver(Number(b.dataset.deliver))));
+  }
+
+  async function loadDeliveries() {
+    const wrap = document.getElementById('deliveryList');
+    let rows;
+    try { rows = await api('/orders/deliveries'); }
+    catch (e) { wrap.innerHTML = `<p class="error-text">${esc(e.message)}</p>`; return; }
+    if (!rows.length) { wrap.innerHTML = '<p class="muted">No deliveries yet.</p>'; return; }
+    wrap.innerHTML = `<table><thead><tr><th>Delivery No</th><th>Date</th><th>Order</th><th>Customer</th><th>Status</th><th></th></tr></thead><tbody>${
+      rows.map(d => `<tr>
+        <td>${esc(d.DeliveryNo)}</td><td>${fmtDate(d.DeliveryDate)}</td><td>${esc(d.OrderNo)}</td><td>${esc(d.CustomerName)}</td>
+        <td><span class="badge ${d.Status === 'Invoiced' ? 'ok' : ''}">${esc(d.Status)}</span></td>
+        <td>${d.Status === 'Delivered' ? `<button class="btn secondary" style="padding:4px 10px;" data-invoice="${d.DeliveryID}">Invoice</button>` : (d.InvoiceID ? '<span class="muted">invoiced</span>' : '')}</td>
+      </tr>`).join('')
+    }</tbody></table>`;
+    wrap.querySelectorAll('[data-invoice]').forEach(b => b.addEventListener('click', () => invoiceDelivery(Number(b.dataset.invoice))));
+  }
+
+  const modal = document.getElementById('delModal');
+  document.getElementById('delClose').addEventListener('click', () => modal.style.display = 'none');
+  let currentOrder = null;
+
+  async function openDeliver(orderId) {
+    const o = await api(`/orders/orders/${orderId}`);
+    currentOrder = o;
+    const rows = o.lines.filter(l => l.OpenToDeliver > 0.0001).map(l => `
+      <tr>
+        <td>${esc(l.ItemName)}</td>
+        <td style="text-align:right;">${l.OpenToDeliver}</td>
+        <td style="text-align:right;">on hand ${l.OnHand}</td>
+        <td><input type="number" min="0" max="${l.OpenToDeliver}" value="${Math.min(l.OpenToDeliver, l.OnHand)}" data-line="${l.LineID}" style="width:90px;text-align:right;" /></td>
+      </tr>`).join('');
+    document.getElementById('delTitle').textContent = `Deliver ${o.OrderNo} — ${o.CustomerName}`;
+    document.getElementById('delBody').innerHTML = `
+      <table><thead><tr><th>Item</th><th style="text-align:right;">Open</th><th style="text-align:right;">Stock</th><th>Deliver now</th></tr></thead><tbody>${rows}</tbody></table>
+      <label style="display:block;margin-top:12px;font-weight:400;"><input type="checkbox" id="alsoInvoice" checked /> Raise the tax invoice at the same time</label>
+      <div id="delMsg" class="error-text" style="display:none;margin-top:8px;"></div>`;
+    modal.style.display = 'flex';
+  }
+
+  document.getElementById('delGo').addEventListener('click', async () => {
+    if (!currentOrder) return;
+    const lines = [...document.querySelectorAll('[data-line]')]
+      .map(inp => ({ orderLineId: Number(inp.dataset.line), qty: Number(inp.value) }))
+      .filter(l => l.qty > 0);
+    if (!lines.length) { const m = document.getElementById('delMsg'); m.textContent = 'Enter a quantity to deliver.'; m.style.display = 'block'; return; }
+    const invoice = document.getElementById('alsoInvoice').checked;
+    try {
+      const r = await api(`/orders/orders/${currentOrder.OrderID}/deliver`, { method: 'POST', body: { lines, invoice } });
+      modal.style.display = 'none';
+      toast(`Delivery ${r.deliveryNo} created${r.invoice ? ' and invoiced as ' + r.invoice.invoiceNo : ''}`, 'success');
+      loadOrders(); loadDeliveries();
+    } catch (e) {
+      const m = document.getElementById('delMsg'); m.textContent = e.message; m.style.display = 'block';
+    }
+  });
+
+  async function invoiceDelivery(deliveryId) {
+    try {
+      const r = await api(`/orders/deliveries/${deliveryId}/invoice`, { method: 'POST', body: {} });
+      toast(`Invoice ${r.invoiceNo} raised`, 'success');
+      loadDeliveries();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  await loadOrders();
+  await loadDeliveries();
+})();
+</script>
+</body>
+</html>

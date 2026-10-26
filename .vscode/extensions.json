@@ -1,0 +1,6 @@
+{
+  // Suggested, not required - the app has no build step and needs no extensions.
+  "recommendations": [
+    "alexcvzz.vscode-sqlite"
+  ]
+}

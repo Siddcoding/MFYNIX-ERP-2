@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Outstanding - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('outstanding');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Outstanding &amp; Ageing</h2>
+    <p class="muted">What is still owed, and for how long. An invoice leaves this list once receipts allocated against it cover it in full.</p>
+    <div class="form-grid" style="margin-top:14px;">
+      <div id="branchFilterWrap"></div>
+      <div><label>As on</label><input type="date" id="asOn" /></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;" id="tabBar"></div>
+  </div>
+  <div id="tabContent"></div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const ROLES = ['Super Admin', 'Company Admin', 'Accountant', 'Branch Manager', 'Auditor', 'Cashier'];
+  if (!ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to Outstanding.</p></div>';
+    return;
+  }
+  const canAllocate = !['Auditor', 'Read Only'].includes(user.role);
+
+  document.getElementById('asOn').valueAsDate = new Date();
+  document.getElementById('asOn').addEventListener('change', render);
+  await buildBranchFilter(document.getElementById('branchFilterWrap'), render);
+
+  const TABS = ['Receivable', 'Payable', 'Ageing Report'];
+  let activeTab = 'Receivable';
+  buildTabBar(document.getElementById('tabBar'), TABS, activeTab, (t) => { activeTab = t; render(); });
+
+  function scope() { return { branchId: selectedBranch(), asOn: document.getElementById('asOn').value }; }
+
+  async function render() {
+    const target = document.getElementById('tabContent');
+    target.innerHTML = '<div class="card"><p class="muted">Loading…</p></div>';
+    try {
+      if (activeTab === 'Ageing Report') await renderAgeing(target);
+      else await renderParties(target, activeTab === 'Receivable' ? 'customers' : 'suppliers');
+      attachHoverEffects();
+    } catch (e) {
+      target.innerHTML = `<div class="card"><p class="error-text">${esc(e.message)}</p></div>`;
+      toast(e.message, 'error');
+    }
+  }
+
+  // ---------------- Party summary with ageing columns ----------------
+  async function renderParties(target, path) {
+    const d = await api(`/outstanding/${path}`, { params: scope() });
+    const isCustomer = path === 'customers';
+
+    target.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="label">${isCustomer ? 'Total receivable' : 'Total payable'}</div>
+          <div class="value" data-count="${d.totals.total}"></div>
+          <div class="sub">${d.parties.length} ${isCustomer ? 'customers' : 'suppliers'}</div></div>
+        <div class="kpi-card"><div class="label">Overdue</div>
+          <div class="value" data-count="${d.totals.overdue}"></div>
+          <div class="sub">past the agreed credit days</div></div>
+        <div class="kpi-card"><div class="label">Over 90 days</div>
+          <div class="value" data-count="${d.totals.buckets['91-180'] + d.totals.buckets['180+']}"></div>
+          <div class="sub">the hardest to collect</div></div>
+        <div class="kpi-card"><div class="label">Current (0–30)</div>
+          <div class="value" data-count="${d.totals.buckets['0-30']}"></div>
+          <div class="sub">still within terms</div></div>
+      </div>
+
+      <div class="card">
+        <h2>${isCustomer ? 'Customer' : 'Supplier'} outstanding</h2>
+        ${renderTable(d.parties.map(p => ({
+          Party: p.partyName, Docs: p.invoices,
+          '0–30': fmtMoney(p.buckets['0-30']), '31–60': fmtMoney(p.buckets['31-60']),
+          '61–90': fmtMoney(p.buckets['61-90']), '91–180': fmtMoney(p.buckets['91-180']),
+          '180+': fmtMoney(p.buckets['180+']),
+          Total: fmtMoney(p.total),
+          Overdue: p.overdue > 0 ? `<span class="badge warn">${fmtMoney(p.overdue)}</span>` : '—',
+          Actions: `<button class="btn secondary" data-party="${p.partyId}" data-name="${esc(p.partyName)}" style="padding:6px 12px;">Open</button>`
+        })), [
+          { key: 'Party', label: isCustomer ? 'Customer' : 'Supplier' },
+          { key: 'Docs', label: 'Docs', align: 'right' },
+          { key: '0–30', label: '0–30', align: 'right' }, { key: '31–60', label: '31–60', align: 'right' },
+          { key: '61–90', label: '61–90', align: 'right' }, { key: '91–180', label: '91–180', align: 'right' },
+          { key: '180+', label: '180+', align: 'right' },
+          { key: 'Total', label: 'Total', align: 'right' },
+          { key: 'Overdue', label: 'Overdue', align: 'right', render: r => r.Overdue },
+          { key: 'Actions', label: '', render: r => r.Actions }
+        ], `Nothing outstanding — every ${isCustomer ? 'invoice' : 'bill'} is settled.`)}
+      </div>`;
+
+    target.querySelectorAll('.kpi-card .value[data-count]').forEach(n => animateCounter(n, Number(n.dataset.count), fmtMoney));
+    target.querySelectorAll('[data-party]').forEach(b =>
+      b.addEventListener('click', () => openParty(path, b.dataset.party, b.dataset.name)));
+  }
+
+  // ---------------- One party's open documents, with allocation ----------------
+  async function openParty(path, partyId, partyName) {
+    try {
+      const d = await api(`/outstanding/${path}/${partyId}`, { params: scope() });
+      const partyType = path === 'customers' ? 'Customer' : 'Supplier';
+
+      const modal = openModal(esc(partyName), `
+        <p class="muted">${d.documents.length} open document${d.documents.length === 1 ? '' : 's'},
+          ${fmtMoney(d.totalOpen)} outstanding.</p>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr>
+              <th>Document</th><th>Date</th><th>Due</th><th style="text-align:right;">Value</th>
+              <th style="text-align:right;">Open</th><th>Age</th>${canAllocate ? '<th style="text-align:right;">Settle now</th>' : ''}
+            </tr></thead>
+            <tbody>
+              ${d.documents.map(doc => `
+                <tr>
+                  <td>${esc(doc.DocNo)}</td>
+                  <td>${fmtDate(doc.DocDate)}</td>
+                  <td>${fmtDate(doc.DueDate)}</td>
+                  <td style="text-align:right;">${fmtMoney(doc.NetAmount)}</td>
+                  <td style="text-align:right;">${fmtMoney(doc.OpenAmount)}</td>
+                  <td>${esc(doc.AgeDays)}d ${doc.Overdue ? '<span class="badge warn">overdue</span>' : ''}</td>
+                  ${canAllocate ? `<td style="text-align:right;">
+                    <input type="number" step="0.01" min="0" max="${esc(doc.OpenAmount)}" placeholder="0"
+                      data-doc-type="${esc(doc.DocType)}" data-doc-id="${esc(doc.DocID)}" data-max="${esc(doc.OpenAmount)}"
+                      style="width:110px;text-align:right;" />
+                  </td>` : ''}
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${canAllocate ? `
+          <div class="form-grid" style="margin-top:14px;">
+            <div><label>Settlement date</label><input type="date" id="allocDate" /></div>
+            <div style="display:flex;align-items:end;gap:8px;">
+              <button class="btn secondary" id="fillOldest" type="button">Fill oldest first</button>
+            </div>
+          </div>
+          <p class="muted" style="font-size:0.8rem;">Record what has actually been received against each document. Post the money itself as a Receipt voucher in Accounts; this is the allocation that clears the invoice.</p>
+          <div id="allocError" class="error-text" style="display:none;"></div>` : ''}
+        <div style="display:flex;gap:8px;margin-top:16px;">
+          ${canAllocate ? '<button class="btn" id="allocSave" data-loading-text="Saving…">Settle documents</button>' : ''}
+          <button class="btn secondary" id="allocClose">Close</button>
+        </div>`);
+
+      modal.querySelector('#allocClose').addEventListener('click', closeModal);
+      if (!canAllocate) return;
+      modal.querySelector('#allocDate').valueAsDate = new Date();
+
+      // "Fill oldest first" is how collections actually get applied - the
+      // oldest invoice is settled before anything newer.
+      modal.querySelector('#fillOldest').addEventListener('click', () => {
+        const total = Number(prompt('How much was received in total?') || 0);
+        if (!(total > 0)) return;
+        let left = total;
+        [...modal.querySelectorAll('[data-doc-id]')].forEach(inp => {
+          const max = Number(inp.dataset.max);
+          const take = Math.min(left, max);
+          inp.value = take > 0 ? take.toFixed(2) : '';
+          left = Math.round((left - take) * 100) / 100;
+        });
+        if (left > 0) toast(`${fmtMoney(left)} is more than the total outstanding — the rest was not allocated.`, 'info');
+      });
+
+      const save = modal.querySelector('#allocSave');
+      save.addEventListener('click', withLoading(save, async () => {
+        const errBox = modal.querySelector('#allocError');
+        errBox.style.display = 'none';
+        const lines = [...modal.querySelectorAll('[data-doc-id]')]
+          .map(inp => ({ docType: inp.dataset.docType, docId: Number(inp.dataset.docId), amount: Number(inp.value) }))
+          .filter(l => l.amount > 0);
+        if (lines.length === 0) {
+          errBox.textContent = 'Enter an amount against at least one document.';
+          errBox.style.display = 'block';
+          return;
+        }
+        try {
+          const r = await api('/outstanding/allocate', { method: 'POST', body: {
+            partyType, partyId: Number(partyId),
+            allocDate: modal.querySelector('#allocDate').value, lines
+          } });
+          closeModal();
+          toast(`${fmtMoney(r.allocated)} settled against ${lines.length} document${lines.length === 1 ? '' : 's'}`, 'success');
+          showSuccessBurst('Settled');
+          render();
+        } catch (e) { errBox.textContent = e.message; errBox.style.display = 'block'; }
+      }));
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ---------------- Ageing report ----------------
+  async function renderAgeing(target) {
+    const partyType = document.getElementById('ageParty') ? document.getElementById('ageParty').value : 'Customer';
+    const d = await api('/outstanding/report/ageing', { params: { ...scope(), partyType } });
+    const max = Math.max(1, ...d.buckets.map(b => b.amount));
+
+    target.innerHTML = `
+      <div class="card">
+        <div class="form-grid">
+          <div><label>Party type</label>
+            <select id="ageParty">
+              <option value="Customer" ${partyType === 'Customer' ? 'selected' : ''}>Customers (receivable)</option>
+              <option value="Supplier" ${partyType === 'Supplier' ? 'selected' : ''}>Suppliers (payable)</option>
+            </select>
+          </div>
+        </div>
+        <h2 style="margin-top:16px;">Ageing as on ${fmtDate(d.asOn)}</h2>
+        <div class="funnel" style="margin-top:14px;">
+          ${d.buckets.map(b => `
+            <div class="funnel-row">
+              <div class="funnel-stage">${b.label}</div>
+              <div class="funnel-bar-wrap"><div class="funnel-bar ${b.key === '180+' ? 'stage-lost' : ''}" style="width:${(b.amount / max) * 100}%"></div></div>
+              <div class="funnel-meta">${fmtMoney(b.amount)} · ${b.count} doc${b.count === 1 ? '' : 's'}</div>
+            </div>`).join('')}
+        </div>
+        <p style="margin-top:16px;font-size:1.05rem;">
+          <strong>Total open: ${fmtMoney(d.totalOpen)}</strong>
+          ${d.totalOverdue > 0 ? `<span class="muted"> &nbsp;·&nbsp; ${fmtMoney(d.totalOverdue)} of it overdue</span>` : ''}
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Open documents, oldest first</h2>
+        ${renderTable(d.documents.map(doc => ({
+          Document: doc.DocNo, Party: doc.PartyName, Branch: doc.BranchName,
+          Date: fmtDate(doc.DocDate), Due: fmtDate(doc.DueDate),
+          Value: fmtMoney(doc.NetAmount), Settled: fmtMoney(doc.Allocated), Open: fmtMoney(doc.OpenAmount),
+          Age: `${esc(doc.AgeDays)}d`, Bucket: doc.Bucket
+        })), null, 'Nothing is outstanding.')}
+      </div>`;
+
+    document.getElementById('ageParty').addEventListener('change', () => renderAgeing(target));
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

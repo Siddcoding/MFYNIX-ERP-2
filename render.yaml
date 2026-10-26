@@ -1,0 +1,53 @@
+# Render blueprint for MFinTech Smart ERP.
+#
+# With this file in the repo root, Render can set the whole service up from the
+# repo instead of you filling in a form: New → Blueprint → pick the repo.
+#
+# ------------------------------------------------------------------------
+# THE ONE THING THAT MATTERS MOST: THE DISK
+# ------------------------------------------------------------------------
+# This app stores everything in a single SQLite file. On Render, a web service
+# without a persistent disk has an ephemeral filesystem - it is wiped on every
+# deploy, every restart and every crash recovery. Without the disk below, the
+# whole ERP resets to an empty demo company each time you push, and every
+# invoice, customer and payslip entered in between is gone for good.
+#
+# Disks require a paid instance type (Starter and up). A free instance cannot
+# mount one. If you deploy this on the free plan, treat it strictly as a demo.
+# ------------------------------------------------------------------------
+
+services:
+  - type: web
+    name: mfintech-erp
+    runtime: node
+    plan: starter              # 'free' cannot mount a disk - see the note above
+    region: singapore          # closest Render region to India; also: oregon, frankfurt
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Generated once by Render and kept secret. The server refuses to boot in
+      # production without a real one, because a known secret means anyone can
+      # forge a login token for any user.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # Point the database at the mounted disk rather than at the code
+      # directory, which is replaced wholesale on every deploy.
+      - key: DB_PATH
+        value: /var/data/mfintech.db
+
+      # better-sqlite3 is a native module; pinning the major version avoids a
+      # rebuild surprise if Render changes its default Node.
+      - key: NODE_VERSION
+        value: "20"
+
+    disk:
+      name: mfintech-data
+      mountPath: /var/data
+      sizeGB: 1                # ~1 GB holds a very large number of transactions

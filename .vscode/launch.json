@@ -1,0 +1,39 @@
+{
+  // Press F5 to start the ERP with the debugger attached.
+  // Breakpoints in backend/**/*.js will work.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run MFinTech ERP",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/server.js",
+      "cwd": "${workspaceFolder}/backend",
+      "skipFiles": ["<node_internals>/**"],
+      "console": "integratedTerminal",
+      "env": {
+        "PORT": "3000"
+      },
+      "serverReadyAction": {
+        "pattern": "Open http://localhost:([0-9]+)",
+        "uriFormat": "http://localhost:%s",
+        "action": "openExternally"
+      }
+    },
+    {
+      "name": "Run on port 3001 (if 3000 is busy)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/server.js",
+      "cwd": "${workspaceFolder}/backend",
+      "skipFiles": ["<node_internals>/**"],
+      "console": "integratedTerminal",
+      "env": { "PORT": "3001" },
+      "serverReadyAction": {
+        "pattern": "Open http://localhost:([0-9]+)",
+        "uriFormat": "http://localhost:%s",
+        "action": "openExternally"
+      }
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+# Dependencies — reinstalled with `npm install`, never committed.
+node_modules/
+
+# The SQLite database and its write-ahead log. This is live business data:
+# customers, invoices, payroll, password hashes. It must not go to GitHub even
+# on a private repo.
+*.db
+*.db-wal
+*.db-shm
+backend/db/*.db
+backend/db/*.db-wal
+backend/db/*.db-shm
+
+# Real secrets. .env.example is committed as the template; .env is not.
+.env
+.env.local
+backend/.env
+
+# Backups taken from the Settings screen.
+*.backup
+backups/
+
+# Test output and screenshots
+shot-*.png
+/tmp/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+
+# Logs
+npm-debug.log*
+nohup.out
+logs/
+*.log

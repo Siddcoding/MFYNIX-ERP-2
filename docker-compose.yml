@@ -1,0 +1,34 @@
+# For running on a plain server (a VPS, or the client's own machine) and for
+# trying the container locally before pushing it anywhere.
+#
+#   JWT_SECRET=$(openssl rand -hex 32) docker compose up -d --build
+#
+# The named volume is what makes the data survive `docker compose down` and
+# every subsequent rebuild.
+
+services:
+  erp:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_PATH: /data/mfintech.db
+      # Must be supplied - the server refuses to boot in production without it.
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET, e.g. export JWT_SECRET=$(openssl rand -hex 32)}
+      # Behind a reverse proxy (nginx, Caddy, Traefik) leave this at 1 so the
+      # login rate limiter sees real client IPs rather than the proxy's.
+      TRUST_PROXY: 1
+    volumes:
+      - mfintech-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  mfintech-data:

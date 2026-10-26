@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Accounts - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('accounts');</script>
+
+<template id="tpl">
+  <div class="card">
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;" id="tabBar"></div>
+    <div id="branchFilterWrap" style="margin-bottom:16px;display:none;"></div>
+    <div id="tabContent"></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const ACCOUNTS_ROLES = ['Super Admin', 'Company Admin', 'Accountant', 'Auditor'];
+  if (!ACCOUNTS_ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to Accounts.</p></div>';
+    return;
+  }
+  const canPost = !['Auditor'].includes(user.role);
+
+  const TABS = ['Vouchers', 'Chart of Accounts', 'Journal Entry', 'Ledger', 'Trial Balance', 'Profit & Loss', 'Balance Sheet'];
+  let activeTab = 'Vouchers';
+  let accountsCache = [];
+  let branchesCache = [];
+
+  const tabBar = document.getElementById('tabBar');
+  TABS.forEach(t => {
+    const btn = el(`<button class="btn ${t === activeTab ? '' : 'secondary'}" data-tab="${t}">${t}</button>`);
+    btn.addEventListener('click', () => { activeTab = t; renderTabs(); renderActiveTab(); });
+    tabBar.appendChild(btn);
+  });
+  function renderTabs() {
+    tabBar.querySelectorAll('button').forEach(b => b.classList.toggle('secondary', b.dataset.tab !== activeTab));
+  }
+
+  // Head-office users get a branch filter for the report tabs
+  if (!user.branchId) {
+    branchesCache = await api('/branches');
+    const wrap = document.getElementById('branchFilterWrap');
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <select id="branchFilter" style="max-width:280px;">
+        <option value="">All Branches (Consolidated)</option>
+        ${branchesCache.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('')}
+      </select>`;
+    document.getElementById('branchFilter').addEventListener('change', renderActiveTab);
+  }
+
+  function currentBranchFilter() {
+    const sel = document.getElementById('branchFilter');
+    return sel ? sel.value || undefined : undefined;
+  }
+
+  async function loadAccounts() {
+    if (accountsCache.length === 0) accountsCache = await api('/accounts/accounts');
+    return accountsCache;
+  }
+
+  async function renderActiveTab() {
+    const target = document.getElementById('tabContent');
+    target.innerHTML = '<p class="muted">Loading…</p>';
+    try {
+      if (activeTab === 'Vouchers') await renderVouchers(target);
+      else if (activeTab === 'Chart of Accounts') await renderChartOfAccounts(target);
+      else if (activeTab === 'Journal Entry') await renderJournalEntry(target);
+      else if (activeTab === 'Ledger') await renderLedger(target);
+      else if (activeTab === 'Trial Balance') await renderTrialBalance(target);
+      else if (activeTab === 'Profit & Loss') await renderProfitLoss(target);
+      else if (activeTab === 'Balance Sheet') await renderBalanceSheet(target);
+      attachHoverEffects();
+    } catch (e) {
+      target.innerHTML = `<p class="error-text">${esc(e.message)}</p>`;
+      toast(e.message, 'error');
+    }
+  }
+
+
+  // ---------------- Payment / Receipt / Contra vouchers ----------------
+  // These are the day-to-day entries. The form picks the right two accounts
+  // and the right side for you, so nobody has to remember what gets debited.
+  async function renderVouchers(target) {
+    const [opts, vouchers] = await Promise.all([
+      api('/accounts/voucher-options'),
+      api('/accounts/vouchers', { params: { branchId: currentBranchFilter() } })
+    ]);
+
+    target.innerHTML = `
+      ${canPost ? `
+      <div class="card">
+        <h2>New voucher</h2>
+        <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;" id="vTypeBar">
+          ${opts.voucherTypes.map((t, i) => `<button class="btn ${i === 0 ? '' : 'secondary'}" data-vtype="${t}">${t}</button>`).join('')}
+        </div>
+        <p class="muted" id="vExplain"></p>
+        <form id="voucherForm">
+          <div class="form-grid">
+            ${user.branchId ? '' : `<div><label>Branch *</label><select name="branchId" id="vBranch" required>${branchesCache.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('')}</select></div>`}
+            <div><label>Date *</label><input type="date" name="entryDate" id="vDate" required /></div>
+            <div id="vModeWrap"><label>Through *</label><select name="mode" id="vMode"><option>Cash</option><option>Bank</option></select></div>
+            <div id="vDirWrap" style="display:none;"><label>Direction *</label>
+              <select name="contraDirection" id="vDir">
+                <option value="CashToBank">Cash deposited into bank</option>
+                <option value="BankToCash">Cash withdrawn from bank</option>
+              </select>
+            </div>
+            <div id="vAgainstWrap"><label>Against account</label>
+              <select name="againstAccountId" id="vAgainst"></select>
+            </div>
+            <div><label>Amount *</label><input type="number" name="amount" step="0.01" min="0.01" required /></div>
+          </div>
+          <label style="margin-top:10px;display:block;">Narration</label>
+          <input name="narration" placeholder="Left blank, a sensible one is filled in automatically" />
+          <div id="vError" class="error-text" style="display:none;"></div>
+          <button class="btn" type="submit" data-loading-text="Posting…" style="margin-top:14px;">Post voucher</button>
+        </form>
+      </div>` : ''}
+
+      <div class="card">
+        <h2>Voucher register</h2>
+        ${renderTable(vouchers.map(v => ({
+          Date: fmtDate(v.EntryDate), Type: v.SourceType, Branch: v.BranchName,
+          Debit: v.debitAccount, Credit: v.creditAccount,
+          Amount: fmtMoney(v.amount), Narration: v.Narration || ''
+        })), null, 'No payment, receipt or contra vouchers yet.')}
+      </div>`;
+
+    if (!canPost) return;
+
+    document.getElementById('vDate').valueAsDate = new Date();
+
+    const EXPLAIN = {
+      Receipt: 'Money coming in. Debits Cash or Bank, credits the account it came from — by default Debtors, i.e. a customer paying you.',
+      Payment: 'Money going out. Credits Cash or Bank, debits the account it went to — by default Creditors, i.e. paying a supplier. Pick an expense head for rent, salaries and so on.',
+      Contra: 'Moving your own money between cash and bank. No profit or loss effect.'
+    };
+    let vType = opts.voucherTypes[0];
+
+    function syncType() {
+      document.getElementById('vExplain').textContent = EXPLAIN[vType];
+      const isContra = vType === 'Contra';
+      document.getElementById('vModeWrap').style.display = isContra ? 'none' : 'block';
+      document.getElementById('vAgainstWrap').style.display = isContra ? 'none' : 'block';
+      document.getElementById('vDirWrap').style.display = isContra ? 'block' : 'none';
+
+      // Default the "against" account to the control account that voucher
+      // normally hits, but let the user pick any other head.
+      const preferred = vType === 'Receipt' ? '1100' : '2000';
+      document.getElementById('vAgainst').innerHTML = opts.accounts.map(a =>
+        `<option value="${esc(a.AccountID)}" ${a.AccountCode === preferred ? 'selected' : ''}>${esc(a.AccountCode)} — ${esc(a.AccountName)}</option>`).join('');
+    }
+    document.querySelectorAll('#vTypeBar [data-vtype]').forEach(b => b.addEventListener('click', () => {
+      vType = b.dataset.vtype;
+      document.querySelectorAll('#vTypeBar [data-vtype]').forEach(x => x.classList.toggle('secondary', x.dataset.vtype !== vType));
+      syncType();
+    }));
+    syncType();
+
+    const form = document.getElementById('voucherForm');
+    const submit = form.querySelector('button[type=submit]');
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      withLoading(submit, async () => {
+        const errBox = document.getElementById('vError');
+        errBox.style.display = 'none';
+        const body = Object.fromEntries(new FormData(form).entries());
+        body.voucherType = vType;
+        if (vType === 'Contra') { delete body.mode; delete body.againstAccountId; }
+        else { delete body.contraDirection; }
+        try {
+          const r = await api('/accounts/voucher', { method: 'POST', body });
+          toast(`${r.voucherType} of ${fmtMoney(r.amount)} posted`, 'success');
+          showSuccessBurst(`${r.voucherType} posted`);
+          renderActiveTab();
+        } catch (err) {
+          errBox.textContent = err.message;
+          errBox.style.display = 'block';
+          toast(err.message, 'error');
+        }
+      })();
+    });
+  }
+
+  // ---------------- Chart of Accounts ----------------
+  async function renderChartOfAccounts(target) {
+    const accounts = await loadAccounts();
+    target.innerHTML = `
+      ${canPost ? `
+      <form id="newAccountForm" class="form-grid" style="margin-bottom:16px;align-items:end;">
+        <div><label>Account Code *</label><input name="accountCode" placeholder="e.g. 5500" required /></div>
+        <div><label>Account Name *</label><input name="accountName" placeholder="e.g. Marketing Expenses" required /></div>
+        <div><label>Type *</label>
+          <select name="accountType" required>
+            <option value="Asset">Asset</option>
+            <option value="Liability">Liability</option>
+            <option value="Equity">Equity</option>
+            <option value="Income">Income</option>
+            <option value="Expense">Expense</option>
+          </select>
+        </div>
+        <div><button class="btn" type="submit">Add Account</button></div>
+      </form>
+      <div id="acctError" class="error-text" style="display:none;"></div>
+      ` : ''}
+      <table>
+        <thead><tr><th>Code</th><th>Name</th><th>Type</th><th>System</th></tr></thead>
+        <tbody>${accounts.map(a => `<tr><td>${esc(a.AccountCode)}</td><td>${esc(a.AccountName)}</td><td>${esc(a.AccountType)}</td><td>${a.IsSystem ? '<span class="badge ok">Auto-posting</span>' : ''}</td></tr>`).join('')}</tbody>
+      </table>`;
+
+    const form = document.getElementById('newAccountForm');
+    if (form) {
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = document.getElementById('acctError');
+        errBox.style.display = 'none';
+        const body = Object.fromEntries(new FormData(e.target).entries());
+        try {
+          await api('/accounts/accounts', { method: 'POST', body });
+          toast('Account created.', 'success');
+          accountsCache = [];
+          await renderChartOfAccounts(target);
+        } catch (err) {
+          errBox.textContent = err.message;
+          errBox.style.display = 'block';
+          toast(err.message, 'error');
+        }
+      });
+    }
+  }
+
+  // ---------------- Journal Entry (manual) ----------------
+  async function renderJournalEntry(target) {
+    if (!canPost) {
+      target.innerHTML = '<p class="muted">Auditor access is read-only — you cannot post journal entries.</p>';
+      return;
+    }
+    const accounts = await loadAccounts();
+    const acctOptions = accounts.map(a => `<option value="${esc(a.AccountID)}">${esc(a.AccountCode)} — ${esc(a.AccountName)}</option>`).join('');
+
+    target.innerHTML = `
+      <form id="journalForm">
+        <div class="form-grid">
+          ${!user.branchId ? `<div><label>Branch *</label><select name="branchId" id="jeBranch">${branchesCache.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('')}</select></div>` : ''}
+          <div><label>Entry Date *</label><input type="date" name="entryDate" id="jeDate" required /></div>
+          <div><label>Narration</label><input name="narration" placeholder="e.g. Paid office rent for August" /></div>
+        </div>
+        <h3 style="margin:16px 0 8px;font-size:0.9rem;">Lines <span class="muted">(must balance: total debit = total credit)</span></h3>
+        <div id="jeLines"></div>
+        <button type="button" class="btn secondary" id="addJeLine" style="margin-top:8px;">+ Add Line</button>
+        <div style="margin-top:14px;font-size:0.85rem;">
+          Debit total: <b id="jeDebitTotal">₹0</b> &nbsp;|&nbsp; Credit total: <b id="jeCreditTotal">₹0</b>
+          <span id="jeBalanceBadge" class="badge warn" style="margin-left:8px;">Not balanced</span>
+        </div>
+        <div id="jeError" class="error-text" style="display:none;"></div>
+        <button class="btn" type="submit" style="margin-top:14px;">Post Journal Entry</button>
+      </form>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:22px 0;" />
+      <h3 style="font-size:0.9rem;margin-bottom:10px;">Recent Journal Entries</h3>
+      <div id="jeRecent">Loading…</div>
+    `;
+    document.getElementById('jeDate').valueAsDate = new Date();
+
+    function addLine() {
+      const row = el(`
+        <div class="form-grid je-line" style="margin-bottom:8px;align-items:end;">
+          <div><label>Account</label><select class="je-account">${acctOptions}</select></div>
+          <div><label>Debit</label><input class="je-debit" type="number" step="0.01" value="0" /></div>
+          <div><label>Credit</label><input class="je-credit" type="number" step="0.01" value="0" /></div>
+          <div><button type="button" class="btn secondary je-remove">Remove</button></div>
+        </div>
+      `);
+      document.getElementById('jeLines').appendChild(row);
+      row.querySelectorAll('input').forEach(inp => inp.addEventListener('input', recalcJe));
+      row.querySelector('.je-remove').addEventListener('click', () => { row.remove(); recalcJe(); });
+    }
+    function recalcJe() {
+      let debit = 0, credit = 0;
+      document.querySelectorAll('.je-line').forEach(row => {
+        debit += Number(row.querySelector('.je-debit').value || 0);
+        credit += Number(row.querySelector('.je-credit').value || 0);
+      });
+      document.getElementById('jeDebitTotal').textContent = fmtMoney(debit);
+      document.getElementById('jeCreditTotal').textContent = fmtMoney(credit);
+      const badge = document.getElementById('jeBalanceBadge');
+      const balanced = Math.abs(debit - credit) < 0.005 && debit > 0;
+      badge.textContent = balanced ? 'Balanced' : 'Not balanced';
+      badge.className = 'badge ' + (balanced ? 'ok' : 'warn');
+    }
+    document.getElementById('addJeLine').addEventListener('click', addLine);
+    addLine(); addLine();
+
+    document.getElementById('journalForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errBox = document.getElementById('jeError');
+      errBox.style.display = 'none';
+      const fd = new FormData(e.target);
+      const lines = [...document.querySelectorAll('.je-line')].map(row => ({
+        accountId: Number(row.querySelector('.je-account').value),
+        debit: Number(row.querySelector('.je-debit').value || 0),
+        credit: Number(row.querySelector('.je-credit').value || 0)
+      })).filter(l => l.debit > 0 || l.credit > 0);
+      const body = {
+        entryDate: fd.get('entryDate'),
+        narration: fd.get('narration'),
+        branchId: fd.get('branchId') ? Number(fd.get('branchId')) : undefined,
+        lines
+      };
+      const submitBtn = e.target.querySelector('button[type="submit"]');
+      const original = submitBtn.innerHTML;
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = `<span class="spinner"></span>Posting...`;
+      try {
+        await api('/accounts/journal', { method: 'POST', body });
+        showSuccessBurst('Journal entry posted');
+        toast('Journal entry posted.', 'success');
+        e.target.reset();
+        document.getElementById('jeDate').valueAsDate = new Date();
+        document.getElementById('jeLines').innerHTML = '';
+        addLine(); addLine();
+        recalcJe();
+        await loadRecentJournal();
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.style.display = 'block';
+        toast(err.message, 'error');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = original;
+      }
+    });
+
+    async function loadRecentJournal() {
+      const rows = await api('/accounts/journal', { params: { branchId: currentBranchFilter() } });
+      const holder = document.getElementById('jeRecent');
+      if (rows.length === 0) { holder.innerHTML = '<p class="muted">No journal entries yet.</p>'; return; }
+      holder.innerHTML = rows.slice(0, 10).map(j => `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border-soft);">
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;">
+            <span><b>${fmtDate(j.EntryDate)}</b> — ${esc(j.Narration || j.SourceType)} <span class="badge ${j.SourceType === 'Manual' ? 'warn' : 'ok'}">${esc(j.SourceType)}</span></span>
+            <span class="muted">${esc(j.BranchName)}</span>
+          </div>
+          <div style="font-size:0.8rem;color:var(--muted);margin-top:4px;">
+            ${j.lines.map(l => `${esc(l.AccountCode)} ${esc(l.AccountName)}: ${l.Debit > 0 ? 'Dr ' + fmtMoney(l.Debit) : 'Cr ' + fmtMoney(l.Credit)}`).join(' · ')}
+          </div>
+        </div>
+      `).join('');
+    }
+    await loadRecentJournal();
+  }
+
+  // ---------------- Ledger ----------------
+  async function renderLedger(target) {
+    const accounts = await loadAccounts();
+    target.innerHTML = `
+      <div style="margin-bottom:16px;">
+        <label>Select Account</label>
+        <select id="ledgerAccountSelect" style="max-width:340px;">
+          ${accounts.map(a => `<option value="${esc(a.AccountID)}">${esc(a.AccountCode)} — ${esc(a.AccountName)}</option>`).join('')}
+        </select>
+      </div>
+      <div id="ledgerHolder">Loading…</div>
+    `;
+    async function loadLedger() {
+      const accountId = document.getElementById('ledgerAccountSelect').value;
+      const data = await api(`/accounts/ledger/${accountId}`, { params: { branchId: currentBranchFilter() } });
+      const holder = document.getElementById('ledgerHolder');
+      if (data.entries.length === 0) { holder.innerHTML = '<p class="muted">No postings to this account yet.</p>'; return; }
+      holder.innerHTML = `
+        <table>
+          <thead><tr><th>Date</th><th>Narration</th><th>Source</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>
+          <tbody>${data.entries.map(e => `
+            <tr>
+              <td>${fmtDate(e.EntryDate)}</td>
+              <td>${esc(e.Narration) || ''}</td>
+              <td><span class="badge ${e.SourceType === 'Manual' ? 'warn' : 'ok'}">${esc(e.SourceType)}</span></td>
+              <td>${e.Debit > 0 ? fmtMoney(e.Debit) : ''}</td>
+              <td>${e.Credit > 0 ? fmtMoney(e.Credit) : ''}</td>
+              <td><b>${fmtMoney(e.runningBalance)}</b></td>
+            </tr>`).join('')}</tbody>
+        </table>
+        <div style="margin-top:12px;font-weight:600;">Closing Balance: ${fmtMoney(data.closingBalance)}</div>
+      `;
+    }
+    document.getElementById('ledgerAccountSelect').addEventListener('change', loadLedger);
+    await loadLedger();
+  }
+
+  // ---------------- Trial Balance ----------------
+  async function renderTrialBalance(target) {
+    const data = await api('/accounts/trial-balance', { params: { branchId: currentBranchFilter() } });
+    target.innerHTML = `
+      <table>
+        <thead><tr><th>Code</th><th>Account</th><th>Type</th><th>Debit</th><th>Credit</th></tr></thead>
+        <tbody>${data.accounts.map(a => `
+          <tr><td>${esc(a.AccountCode)}</td><td>${esc(a.AccountName)}</td><td>${esc(a.AccountType)}</td>
+            <td>${a.Debit > 0 ? fmtMoney(a.Debit) : ''}</td><td>${a.Credit > 0 ? fmtMoney(a.Credit) : ''}</td></tr>
+        `).join('')}</tbody>
+        <tfoot><tr style="font-weight:700;border-top:2px solid var(--border);">
+          <td colspan="3">Total</td><td>${fmtMoney(data.totalDebit)}</td><td>${fmtMoney(data.totalCredit)}</td>
+        </tr></tfoot>
+      </table>
+      <div style="margin-top:14px;">
+        <span class="badge ${data.balanced ? 'ok' : 'warn'}">${data.balanced ? 'Balanced ✓' : 'Not Balanced'}</span>
+      </div>
+    `;
+    if (data.accounts.length === 0) target.innerHTML = '<p class="muted">No journal activity yet — post a sale, purchase, or manual entry first.</p>';
+  }
+
+  // ---------------- Profit & Loss ----------------
+  async function renderProfitLoss(target) {
+    const data = await api('/accounts/profit-loss', { params: { branchId: currentBranchFilter() } });
+    target.innerHTML = `
+      <div class="kpi-grid" style="margin-bottom:20px;">
+        <div class="kpi-card"><div class="label">Total Income</div><div class="value">${fmtMoney(data.totalIncome)}</div></div>
+        <div class="kpi-card"><div class="label">Total Expense</div><div class="value">${fmtMoney(data.totalExpense)}</div></div>
+        <div class="kpi-card"><div class="label">Net ${data.netProfit >= 0 ? 'Profit' : 'Loss'}</div><div class="value" style="color:${data.netProfit >= 0 ? 'var(--success)' : 'var(--danger)'};">${fmtMoney(Math.abs(data.netProfit))}</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+        <div>
+          <h3 style="font-size:0.88rem;margin-bottom:8px;">Income</h3>
+          <table><tbody>${data.income.map(r => `<tr><td>${esc(r.name)}</td><td>${fmtMoney(r.amount)}</td></tr>`).join('') || '<tr><td class="muted">None</td></tr>'}</tbody></table>
+        </div>
+        <div>
+          <h3 style="font-size:0.88rem;margin-bottom:8px;">Expense</h3>
+          <table><tbody>${data.expense.map(r => `<tr><td>${esc(r.name)}</td><td>${fmtMoney(r.amount)}</td></tr>`).join('') || '<tr><td class="muted">None</td></tr>'}</tbody></table>
+        </div>
+      </div>
+    `;
+    attachHoverEffects();
+  }
+
+  // ---------------- Balance Sheet ----------------
+  async function renderBalanceSheet(target) {
+    const data = await api('/accounts/balance-sheet', { params: { branchId: currentBranchFilter() } });
+    target.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:16px;">
+        <div>
+          <h3 style="font-size:0.88rem;margin-bottom:8px;">Assets</h3>
+          <table><tbody>${data.assets.map(r => `<tr><td>${esc(r.name)}</td><td>${fmtMoney(r.amount)}</td></tr>`).join('') || '<tr><td class="muted">None</td></tr>'}</tbody>
+          <tfoot><tr style="font-weight:700;"><td>Total Assets</td><td>${fmtMoney(data.totalAssets)}</td></tr></tfoot></table>
+        </div>
+        <div>
+          <h3 style="font-size:0.88rem;margin-bottom:8px;">Liabilities</h3>
+          <table><tbody>${data.liabilities.map(r => `<tr><td>${esc(r.name)}</td><td>${fmtMoney(r.amount)}</td></tr>`).join('') || '<tr><td class="muted">None</td></tr>'}</tbody>
+          <tfoot><tr style="font-weight:700;"><td>Total Liabilities</td><td>${fmtMoney(data.totalLiabilities)}</td></tr></tfoot></table>
+          <h3 style="font-size:0.88rem;margin:14px 0 8px;">Equity</h3>
+          <table><tbody>${data.equity.map(r => `<tr><td>${esc(r.name)}</td><td>${fmtMoney(r.amount)}</td></tr>`).join('')}</tbody>
+          <tfoot><tr style="font-weight:700;"><td>Total Equity</td><td>${fmtMoney(data.totalEquity)}</td></tr></tfoot></table>
+        </div>
+      </div>
+      <span class="badge ${data.balanced ? 'ok' : 'warn'}">${data.balanced ? 'Assets = Liabilities + Equity ✓' : 'Not Balanced'}</span>
+    `;
+    attachHoverEffects();
+  }
+
+  await renderActiveTab();
+})();
+</script>
+</body>
+</html>

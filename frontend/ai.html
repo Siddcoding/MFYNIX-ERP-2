@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MFinAI - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('ai');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>MFinAI — ask your books a question</h2>
+    <p class="muted">
+      Ask in plain English and get the answer straight from your own data, with the numbers it came from.
+      This runs entirely on your server: no internet, no API key, and nothing about your business ever leaves the machine.
+      It's a rule-based engine, not a chatbot — if it can't compute an answer it says so rather than making one up.
+    </p>
+    <form id="askForm" style="margin-top:16px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <input id="questionInput" placeholder="e.g. What were my sales last month?" style="flex:1;min-width:220px;" autocomplete="off" />
+        <button class="btn" type="submit" data-loading-text="Thinking…">Ask</button>
+      </div>
+    </form>
+    <div id="suggestions" style="margin-top:14px;"></div>
+  </div>
+
+  <div id="answerArea"></div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+      <h2 style="margin:0;">Automated insights</h2>
+      <button class="btn secondary" id="refreshInsights" data-loading-text="Refreshing…">Refresh</button>
+    </div>
+    <p class="muted">Computed from live data every time — sales trends, branch concentration, stock problems, GST position, overdue follow-ups and the integrity of the books.</p>
+    <div id="insightList" style="margin-top:14px;"></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+
+  const form = document.getElementById('askForm');
+  const input = document.getElementById('questionInput');
+  const submit = form.querySelector('button[type=submit]');
+
+  // Suggestion chips, straight from the server's own capability list, so they
+  // can never advertise something the engine doesn't actually handle.
+  const { examples } = await api('/ai/capabilities');
+  const sug = document.getElementById('suggestions');
+  sug.innerHTML = examples.map(e => `<button class="chip" type="button">${e}</button>`).join('');
+  sug.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+    input.value = c.textContent;
+    form.requestSubmit();
+  }));
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const question = input.value.trim();
+    if (!question) { toast('Type a question first', 'info'); return; }
+    withLoading(submit, async () => {
+      try {
+        const d = await api('/ai/ask', { method: 'POST', body: { question } });
+        renderAnswer(d);
+      } catch (err) { toast(err.message, 'error'); }
+    })();
+  });
+
+  function renderAnswer(d) {
+    const area = document.getElementById('answerArea');
+    if (!d.intent) {
+      area.innerHTML = `
+        <div class="card">
+          <div class="answer-question">${escapeHtml(d.question)}</div>
+          <p>${escapeHtml(d.answer)}</p>
+          <p class="muted">Try one of these instead:</p>
+          <ul class="muted">${(d.suggestions || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>
+        </div>`;
+      return;
+    }
+    area.innerHTML = `
+      <div class="card">
+        <div class="answer-question">${escapeHtml(d.question)}</div>
+        <p class="answer-text">${escapeHtml(d.answer)}</p>
+        <p class="muted" style="font-size:0.78rem;">
+          Interpreted as: <strong>${d.intent.replace(/_/g, ' ')}</strong>
+          ${d.period ? ` · period ${d.period.from} to ${d.period.to} (${d.period.label})` : ''}
+          ${d.scope ? ` · ${d.scope}` : ''}
+        </p>
+        ${d.table && d.table.length ? renderTable(d.table, (d.columns || []).map(c => ({ key: c, label: c }))) : ''}
+      </div>`;
+    attachHoverEffects();
+    area.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  const ICONS = { critical: '🚨', warning: '⚠️', info: 'ℹ️', positive: '✅' };
+
+  async function loadInsights() {
+    const list = document.getElementById('insightList');
+    list.innerHTML = '<p class="muted">Analysing…</p>';
+    try {
+      const d = await api('/ai/insights');
+      list.innerHTML = d.insights.map((i, idx) => `
+        <div class="insight insight-${i.type}" style="animation-delay:${idx * 0.05}s">
+          <div class="insight-icon">${ICONS[i.type] || 'ℹ️'}</div>
+          <div>
+            <div class="insight-title">${escapeHtml(i.title)}</div>
+            <div class="insight-detail">${escapeHtml(i.detail)}</div>
+          </div>
+        </div>`).join('');
+    } catch (e) {
+      list.innerHTML = `<p class="error-text">${esc(e.message)}</p>`;
+    }
+  }
+
+  const refresh = document.getElementById('refreshInsights');
+  refresh.addEventListener('click', withLoading(refresh, loadInsights));
+
+
+  loadInsights();
+})();
+</script>
+</body>
+</html>

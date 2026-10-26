@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Banking - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('banking');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Banking &amp; Reconciliation</h2>
+    <p class="muted">Import a bank statement, agree it against the books, and post the entries that only ever appear on the statement — charges, interest, direct debits.</p>
+    <div class="form-grid" style="margin-top:14px;">
+      <div><label>Bank account</label><select id="accountSel"></select></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;" id="tabBar"></div>
+  </div>
+  <div id="tabContent"></div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const ROLES = ['Super Admin', 'Company Admin', 'Accountant', 'Auditor'];
+  if (!ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to Banking.</p></div>';
+    return;
+  }
+  const canWrite = !['Auditor', 'Read Only'].includes(user.role);
+
+
+  let accounts = [], coa = [];
+  const accountSel = document.getElementById('accountSel');
+
+  async function loadAccounts() {
+    [accounts, coa] = await Promise.all([api('/banking/accounts'), api('/accounts/accounts').catch(() => [])]);
+    accountSel.innerHTML = accounts.length
+      ? accounts.map(a => `<option value="${esc(a.BankAccountID)}">${esc(a.AccountName)}${a.BankName ? ' — ' + esc(a.BankName) : ''}${a.Unmatched ? ` (${esc(a.Unmatched)} unmatched)` : ''}</option>`).join('')
+      : '<option value="">No bank accounts yet</option>';
+  }
+  accountSel.addEventListener('change', render);
+  function currentAccount() { return accountSel.value || null; }
+
+  const TABS = ['Reconciliation', 'Statement', 'Import', 'Accounts'];
+  let activeTab = 'Reconciliation';
+  buildTabBar(document.getElementById('tabBar'), TABS, activeTab, (t) => { activeTab = t; render(); });
+
+  async function render() {
+    const target = document.getElementById('tabContent');
+    target.innerHTML = '<div class="card"><p class="muted">Loading…</p></div>';
+    try {
+      if (activeTab === 'Accounts') await renderAccounts(target);
+      else if (!currentAccount()) {
+        target.innerHTML = '<div class="card"><p class="muted">Add a bank account first, on the Accounts tab.</p></div>';
+      }
+      else if (activeTab === 'Reconciliation') await renderRecon(target);
+      else if (activeTab === 'Statement') await renderStatement(target);
+      else await renderImport(target);
+      attachHoverEffects();
+    } catch (e) {
+      target.innerHTML = `<div class="card"><p class="error-text">${esc(e.message)}</p></div>`;
+      toast(e.message, 'error');
+    }
+  }
+
+  // ---------------- Bank accounts ----------------
+  async function renderAccounts(target) {
+    target.innerHTML = `
+      ${canWrite ? `
+      <div class="card">
+        <h2>Add a bank account</h2>
+        <p class="muted">Each account points at a Chart of Accounts head — that's where a matched statement line posts.</p>
+        <form id="accForm">
+          <div class="form-grid">
+            <div><label>Account name *</label><input name="accountName" placeholder="e.g. Current Account – HDFC" required /></div>
+            <div><label>Bank</label><input name="bankName" /></div>
+            <div><label>Account number</label><input name="accountNo" /></div>
+            <div><label>IFSC</label><input name="ifsc" /></div>
+            <div><label>Posts to</label>
+              <select name="ledgerAccountId">
+                ${coa.filter(a => a.AccountType === 'Asset').map(a =>
+                  `<option value="${esc(a.AccountID)}" ${a.AccountCode === '1010' ? 'selected' : ''}>${esc(a.AccountCode)} — ${esc(a.AccountName)}</option>`).join('')}
+              </select>
+            </div>
+            <div><label>Opening balance</label><input name="openingBalance" type="number" step="0.01" value="0" /></div>
+          </div>
+          <div id="accError" class="error-text" style="display:none;"></div>
+          <button class="btn" type="submit" data-loading-text="Saving…" style="margin-top:14px;">Add account</button>
+        </form>
+      </div>` : ''}
+      <div class="card">
+        <h2>Bank accounts</h2>
+        ${renderTable(accounts.map(a => ({
+          Name: a.AccountName, Bank: a.BankName || '—', Number: a.AccountNo || '—',
+          'Posts to': a.LedgerAccountName || '—', Branch: a.BranchName || 'Company-wide',
+          Opening: fmtMoney(a.OpeningBalance), Lines: a.StatementLines,
+          Unmatched: a.Unmatched ? `<span class="badge warn">${esc(a.Unmatched)}</span>` : '<span class="badge ok">0</span>'
+        })), [
+          { key: 'Name', label: 'Account' }, { key: 'Bank', label: 'Bank' }, { key: 'Number', label: 'Number' },
+          { key: 'Posts to', label: 'Posts to' }, { key: 'Branch', label: 'Branch' },
+          { key: 'Opening', label: 'Opening', align: 'right' },
+          { key: 'Lines', label: 'Statement lines', align: 'right' },
+          { key: 'Unmatched', label: 'Unmatched', render: r => r.Unmatched }
+        ], 'No bank accounts yet.')}
+      </div>`;
+
+    const form = document.getElementById('accForm');
+    if (form) {
+      const submit = form.querySelector('button[type=submit]');
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        withLoading(submit, async () => {
+          const errBox = document.getElementById('accError');
+          errBox.style.display = 'none';
+          try {
+            await api('/banking/accounts', { method: 'POST', body: Object.fromEntries(new FormData(form).entries()) });
+            toast('Bank account added', 'success');
+            await loadAccounts();
+            render();
+          } catch (err) { errBox.textContent = err.message; errBox.style.display = 'block'; }
+        })();
+      });
+    }
+  }
+
+  // ---------------- Reconciliation ----------------
+  async function renderRecon(target) {
+    const d = await api(`/banking/reconciliation/${currentAccount()}`);
+    target.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="label">Statement balance</div><div class="value" data-count="${d.statementBalance}"></div><div class="sub">what the bank says</div></div>
+        <div class="kpi-card"><div class="label">Book balance</div><div class="value" data-count="${d.bookBalance}"></div><div class="sub">what the ledger says</div></div>
+        <div class="kpi-card"><div class="label">Difference</div><div class="value" data-count="${d.difference}"></div><div class="sub">${d.reconciled ? 'reconciled' : 'still to explain'}</div></div>
+        <div class="kpi-card"><div class="label">Unmatched lines</div><div class="value">${d.unmatchedCount}</div><div class="sub">worth ${fmtMoney(d.unmatchedValue)}</div></div>
+      </div>
+
+      <div class="card">
+        <h2>${d.reconciled ? 'Reconciled' : 'Unmatched statement lines'}</h2>
+        ${d.reconciled && d.unmatchedCount === 0
+          ? '<p class="muted">The statement and the books agree, and every line is accounted for.</p>'
+          : `<p class="muted">Match each line to an entry already in the books, or post the one that is missing.</p>
+             ${renderTable(d.unmatched.map(l => ({
+               Date: fmtDate(l.TxnDate), Description: l.Description || '—', Ref: l.RefNo || '—',
+               'Money in': l.Credit ? fmtMoney(l.Credit) : '', 'Money out': l.Debit ? fmtMoney(l.Debit) : '',
+               Actions: canWrite
+                 ? `<button class="btn secondary" data-suggest="${esc(l.StatementLineID)}" style="padding:6px 12px;">Match</button>
+                    <button class="btn secondary" data-post="${esc(l.StatementLineID)}" style="padding:6px 12px;">Post new</button>
+                    <button class="btn secondary" data-ignore="${esc(l.StatementLineID)}" style="padding:6px 12px;">Ignore</button>`
+                 : '—'
+             })), [
+               { key: 'Date', label: 'Date' }, { key: 'Description', label: 'Description' }, { key: 'Ref', label: 'Reference' },
+               { key: 'Money in', label: 'Money in', align: 'right' }, { key: 'Money out', label: 'Money out', align: 'right' },
+               { key: 'Actions', label: '', render: r => r.Actions }
+             ], 'Nothing unmatched.')}`}
+      </div>`;
+
+    target.querySelectorAll('.kpi-card .value[data-count]').forEach(n => animateCounter(n, Number(n.dataset.count), fmtMoney));
+    wireLineActions(target);
+  }
+
+  function wireLineActions(target) {
+    target.querySelectorAll('[data-suggest]').forEach(b => b.addEventListener('click', () => openSuggestions(b.dataset.suggest)));
+    target.querySelectorAll('[data-post]').forEach(b => b.addEventListener('click', () => openPost(b.dataset.post)));
+    target.querySelectorAll('[data-ignore]').forEach(b => b.addEventListener('click', withLoading(b, async () => {
+      try {
+        await api(`/banking/statement/line/${b.dataset.ignore}/ignore`, { method: 'POST', body: {} });
+        toast('Line ignored', 'success'); render();
+      } catch (e) { toast(e.message, 'error'); }
+    })));
+    target.querySelectorAll('[data-unmatch]').forEach(b => b.addEventListener('click', withLoading(b, async () => {
+      try {
+        await api(`/banking/statement/line/${b.dataset.unmatch}/unmatch`, { method: 'POST', body: {} });
+        toast('Match removed', 'success'); render();
+      } catch (e) { toast(e.message, 'error'); }
+    })));
+  }
+
+  async function openSuggestions(lineId) {
+    try {
+      const d = await api(`/banking/statement/line/${lineId}/suggestions`);
+      const modal = openModal('Match this line', `
+        <p class="muted">${fmtDate(d.line.TxnDate)} · ${esc(d.line.Description || '')} ·
+          ${d.line.Credit ? 'in ' + fmtMoney(d.line.Credit) : 'out ' + fmtMoney(d.line.Debit)}</p>
+        <p class="muted" style="font-size:0.8rem;">Only entries of the same amount, on the same side, within a week are suggested — the system never guesses which invoice a payment belongs to.</p>
+        ${d.suggestions.length === 0
+          ? '<p class="muted" style="margin-top:12px;">Nothing in the books matches. Use “Post new” instead.</p>'
+          : `<div style="overflow-x:auto;margin-top:12px;"><table>
+              <thead><tr><th>Date</th><th>Narration</th><th>Source</th><th>Branch</th><th></th></tr></thead>
+              <tbody>${d.suggestions.map(s => `
+                <tr><td>${fmtDate(s.EntryDate)}</td><td>${esc(s.Narration || '')}</td><td>${esc(s.SourceType)}</td>
+                <td>${esc(s.BranchName)}</td>
+                <td><button class="btn" data-pick="${esc(s.JournalID)}" style="padding:6px 12px;">Match</button></td></tr>`).join('')}
+              </tbody></table></div>`}
+        <div id="matchError" class="error-text" style="display:none;"></div>
+        <button class="btn secondary" id="matchClose" style="margin-top:14px;">Close</button>`);
+      modal.querySelector('#matchClose').addEventListener('click', closeModal);
+      modal.querySelectorAll('[data-pick]').forEach(b => b.addEventListener('click', withLoading(b, async () => {
+        try {
+          await api(`/banking/statement/line/${lineId}/match`, { method: 'POST', body: { journalId: Number(b.dataset.pick) } });
+          closeModal(); toast('Line matched', 'success'); render();
+        } catch (e) {
+          const errBox = modal.querySelector('#matchError');
+          errBox.textContent = e.message; errBox.style.display = 'block';
+          toast(e.message, 'error');
+        }
+      })));
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function openPost(lineId) {
+    const modal = openModal('Post this line to the books', `
+      <p class="muted">Use this for anything that only appears on the statement — bank charges, interest, a direct debit.
+        The bank side is posted automatically; pick what the other side is.</p>
+      <label>Account</label>
+      <select id="postAccount">${coa.map(a => `<option value="${esc(a.AccountID)}">${esc(a.AccountCode)} — ${esc(a.AccountName)}</option>`).join('')}</select>
+      <label style="margin-top:10px;display:block;">Narration</label>
+      <input id="postNarration" placeholder="Left blank, the statement description is used" />
+      <div id="postError" class="error-text" style="display:none;"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn" id="postSave" data-loading-text="Posting…">Post &amp; match</button>
+        <button class="btn secondary" id="postCancel">Cancel</button>
+      </div>`);
+    modal.querySelector('#postCancel').addEventListener('click', closeModal);
+    const save = modal.querySelector('#postSave');
+    save.addEventListener('click', withLoading(save, async () => {
+      const errBox = modal.querySelector('#postError');
+      errBox.style.display = 'none';
+      try {
+        await api(`/banking/statement/line/${lineId}/post`, { method: 'POST', body: {
+          contraAccountId: Number(modal.querySelector('#postAccount').value),
+          narration: modal.querySelector('#postNarration').value
+        } });
+        closeModal(); toast('Posted and matched', 'success'); showSuccessBurst('Posted'); render();
+      } catch (e) {
+        errBox.textContent = e.message;
+        errBox.style.display = 'block';
+        toast(e.message, 'error');
+      }
+    }));
+  }
+
+  // ---------------- Statement browser ----------------
+  let stmtPage = 1;
+  async function renderStatement(target) {
+    const res = await api(`/banking/statement/${currentAccount()}`, { params: { page: stmtPage } });
+    const rows = rowsOf(res);
+    target.innerHTML = `
+      <div class="card">
+        <h2>Imported statement lines</h2>
+        ${renderTable(rows.map(l => ({
+          Date: fmtDate(l.TxnDate), Description: l.Description || '—', Ref: l.RefNo || '—',
+          In: l.Credit ? fmtMoney(l.Credit) : '', Out: l.Debit ? fmtMoney(l.Debit) : '',
+          Status: l.Status === 'Matched' ? '<span class="badge ok">Matched</span>'
+                : l.Status === 'Ignored' ? '<span class="badge">Ignored</span>'
+                : '<span class="badge warn">Unmatched</span>',
+          Against: l.MatchedNarration || '—',
+          Actions: canWrite && l.Status === 'Matched'
+            ? `<button class="btn secondary" data-unmatch="${esc(l.StatementLineID)}" style="padding:6px 12px;">Unmatch</button>` : ''
+        })), [
+          { key: 'Date', label: 'Date' }, { key: 'Description', label: 'Description' }, { key: 'Ref', label: 'Ref' },
+          { key: 'In', label: 'In', align: 'right' }, { key: 'Out', label: 'Out', align: 'right' },
+          { key: 'Status', label: 'Status', render: r => r.Status },
+          { key: 'Against', label: 'Matched to' },
+          { key: 'Actions', label: '', render: r => r.Actions }
+        ], 'Nothing imported for this account yet.')}
+        <div id="stmtPager"></div>
+      </div>`;
+    renderPager(document.getElementById('stmtPager'), res, (n) => { stmtPage = n; renderStatement(target); });
+    wireLineActions(target);
+  }
+
+  // ---------------- Import ----------------
+  async function renderImport(target) {
+    const formats = await api('/banking/date-formats');
+    target.innerHTML = `
+      <div class="card">
+        <h2>Import a statement</h2>
+        <p class="muted">
+          Bank CSV layouts differ, so nothing is assumed: pick the file, then say which column is which.
+          Re-importing the same file is safe — rows already present are skipped rather than duplicated.
+        </p>
+        <div class="form-grid" style="margin-top:12px;">
+          <div><label>CSV file</label><input type="file" id="csvFile" accept=".csv,text/csv" /></div>
+          <div><label>Date format</label><select id="dateFormat">${formats.map(f => `<option>${f}</option>`).join('')}</select></div>
+          <div class="checkbox-row" style="align-self:end;"><label><input type="checkbox" id="hasHeader" checked /> First row is a header</label></div>
+        </div>
+        <div id="mapArea" style="margin-top:16px;"></div>
+        <div id="importError" class="error-text" style="display:none;"></div>
+      </div>`;
+
+    let parsed = null;
+    document.getElementById('csvFile').addEventListener('change', (ev) => {
+      const f = ev.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        parsed = parseCsv(reader.result);
+        renderMapping(parsed);
+      };
+      reader.readAsText(f);
+    });
+
+    // A small CSV parser: handles quoted fields and embedded commas, which is
+    // all a bank statement needs.
+    function parseCsv(text) {
+      const rows = [];
+      let row = [], field = '', inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (inQuotes) {
+          if (ch === '"' && text[i + 1] === '"') { field += '"'; i++; }
+          else if (ch === '"') inQuotes = false;
+          else field += ch;
+        } else if (ch === '"') inQuotes = true;
+        else if (ch === ',') { row.push(field); field = ''; }
+        else if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+        else if (ch !== '\r') field += ch;
+      }
+      if (field.length || row.length) { row.push(field); rows.push(row); }
+      return rows.filter(r => r.some(c => String(c).trim() !== ''));
+    }
+
+    function renderMapping(rows) {
+      const header = document.getElementById('hasHeader').checked ? rows[0] : rows[0].map((_, i) => `Column ${i + 1}`);
+      const colOptions = (selected) => `<option value="">— not present —</option>` +
+        header.map((h, i) => `<option value="${i}" ${i === selected ? 'selected' : ''}>${esc(h)}</option>`).join('');
+
+      // Guess the mapping from the header names, so most files need no work.
+      const guess = (...names) => header.findIndex(h => names.some(n => String(h).toLowerCase().includes(n)));
+
+      document.getElementById('mapArea').innerHTML = `
+        <h3 style="font-size:0.95rem;margin:0 0 8px;">Map the columns</h3>
+        <div class="form-grid">
+          <div><label>Date *</label><select id="mDate">${colOptions(guess('date', 'txn dt'))}</select></div>
+          <div><label>Description</label><select id="mDesc">${colOptions(guess('narrat', 'descrip', 'particul', 'remark'))}</select></div>
+          <div><label>Reference</label><select id="mRef">${colOptions(guess('ref', 'chq', 'cheque', 'utr'))}</select></div>
+          <div><label>Money out (debit)</label><select id="mDebit">${colOptions(guess('withdraw', 'debit', 'dr'))}</select></div>
+          <div><label>Money in (credit)</label><select id="mCredit">${colOptions(guess('deposit', 'credit', 'cr'))}</select></div>
+          <div><label>Balance</label><select id="mBalance">${colOptions(guess('balance'))}</select></div>
+        </div>
+        <p class="muted" style="font-size:0.8rem;margin-top:8px;">If your bank uses one signed amount column instead of separate debit and credit, map it as “Money out” and leave “Money in” unset only when the amounts are unsigned; otherwise use the single-column option below.</p>
+        <div class="checkbox-row"><label><input type="checkbox" id="singleAmount" /> One signed amount column (negative = money out)</label></div>
+
+        <h3 style="font-size:0.95rem;margin:16px 0 8px;">Preview — first ${Math.min(5, rows.length)} rows</h3>
+        <div style="overflow-x:auto;"><table><thead><tr>${header.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead>
+          <tbody>${rows.slice(document.getElementById('hasHeader').checked ? 1 : 0, 6).map(r =>
+            `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
+
+        <button class="btn" id="doImport" data-loading-text="Importing…" style="margin-top:14px;">Import ${rows.length - (document.getElementById('hasHeader').checked ? 1 : 0)} rows</button>`;
+
+      const btn = document.getElementById('doImport');
+      btn.addEventListener('click', withLoading(btn, async () => {
+        const errBox = document.getElementById('importError');
+        errBox.style.display = 'none';
+        const num = (id) => { const v = document.getElementById(id).value; return v === '' ? undefined : Number(v); };
+        const single = document.getElementById('singleAmount').checked;
+        const mapping = {
+          date: num('mDate'), description: num('mDesc'), ref: num('mRef'), balance: num('mBalance')
+        };
+        if (single) mapping.amount = num('mDebit');
+        else { mapping.debit = num('mDebit'); mapping.credit = num('mCredit'); }
+
+        if (mapping.date === undefined) {
+          errBox.textContent = 'Tell the importer which column holds the date.';
+          errBox.style.display = 'block';
+          return;
+        }
+        try {
+          const r = await api('/banking/import', { method: 'POST', body: {
+            bankAccountId: Number(currentAccount()),
+            rows, mapping,
+            hasHeader: document.getElementById('hasHeader').checked,
+            dateFormat: document.getElementById('dateFormat').value
+          } });
+          toast(`${r.imported} imported, ${r.duplicates} already present, ${r.skipped} unreadable`, r.imported ? 'success' : 'info');
+          if (r.problems && r.problems.length) toast(r.problems.join(' · '), 'info', 9000);
+          await loadAccounts();
+          activeTab = 'Reconciliation';
+          buildTabBar(document.getElementById('tabBar'), TABS, activeTab, (t) => { activeTab = t; render(); });
+          render();
+        } catch (e) { errBox.textContent = e.message; errBox.style.display = 'block'; }
+      }));
+    }
+
+    document.getElementById('hasHeader').addEventListener('change', () => { if (parsed) renderMapping(parsed); });
+  }
+
+  await loadAccounts();
+  render();
+})();
+</script>
+</body>
+</html>

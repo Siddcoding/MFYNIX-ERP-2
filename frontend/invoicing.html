@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Invoicing - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('invoicing');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Invoicing</h2>
+    <p class="muted" style="margin-top:-6px;">All sales invoices by customer, all purchase bills by vendor, with e-invoice (IRN/QR) and e-way-bill actions.</p>
+    <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;" id="tabBar"></div>
+  </div>
+
+  <div class="card">
+    <div class="filter-bar">
+      <div id="partyFilterWrap"><label id="partyLabel">Customer</label><select id="partySelect"><option value="">All</option></select></div>
+      <div><label>From</label><input id="fFrom" type="date" /></div>
+      <div><label>To</label><input id="fTo" type="date" /></div>
+      <div><label>Status</label><select id="fStatus"><option value="">All</option><option>Posted</option><option>Draft</option><option>Cancelled</option></select></div>
+      <div style="align-self:flex-end;"><button class="btn secondary" id="fClear">Clear</button></div>
+    </div>
+    <div id="summaryLine" class="muted" style="margin:6px 0;"></div>
+    <div id="list"></div>
+  </div>
+</template>
+
+<div id="eiModal" class="modal-backdrop" style="display:none;">
+  <div class="modal">
+    <h3 id="eiTitle">E-Invoice</h3>
+    <div id="eiBody"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <button class="btn secondary" id="eiClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const canCompliance = ['Super Admin', 'Company Admin', 'Accountant', 'Branch Manager'].includes(user.role);
+
+  let tab = 'Sales invoices';
+  buildTabBar(document.getElementById('tabBar'), ['Sales invoices', 'Purchase bills'], tab, (t) => { tab = t; loadParties().then(load); });
+
+  const partySelect = document.getElementById('partySelect');
+  const partyLabel = document.getElementById('partyLabel');
+
+  async function loadParties() {
+    const isSales = tab === 'Sales invoices';
+    partyLabel.textContent = isSales ? 'Customer' : 'Vendor';
+    partySelect.innerHTML = '<option value="">All</option>';
+    try {
+      const rows = await api(isSales ? '/masters/customers' : '/masters/suppliers');
+      rows.forEach(r => {
+        const o = document.createElement('option');
+        o.value = isSales ? r.CustomerID : r.SupplierID;
+        o.textContent = isSales ? r.CustomerName : r.SupplierName;
+        partySelect.appendChild(o);
+      });
+    } catch (e) { /* leave as All */ }
+  }
+
+  async function load() {
+    const isSales = tab === 'Sales invoices';
+    const params = {
+      from: document.getElementById('fFrom').value || undefined,
+      to: document.getElementById('fTo').value || undefined,
+      status: document.getElementById('fStatus').value || undefined,
+      pageSize: 100
+    };
+    if (partySelect.value) params[isSales ? 'customerId' : 'supplierId'] = partySelect.value;
+    const listEl = document.getElementById('list');
+    listEl.innerHTML = '<p class="muted">Loading…</p>';
+    let data;
+    try { data = await api(isSales ? '/sales' : '/purchase', { params }); }
+    catch (e) { listEl.innerHTML = `<p class="error-text">${esc(e.message)}</p>`; return; }
+    const rows = data.data || data.rows || data;
+    const total = rows.reduce((s, r) => s + Number(r.NetAmount || 0), 0);
+    document.getElementById('summaryLine').textContent = `${rows.length} ${isSales ? 'invoice' : 'bill'}(s) · total ${fmtMoney(total)}`;
+    if (!rows.length) { listEl.innerHTML = '<p class="muted">Nothing here yet.</p>'; return; }
+
+    const head = isSales
+      ? `<tr><th>Invoice No</th><th>Date</th><th>Customer</th><th style="text-align:right;">Net</th><th>Status</th><th>E-Invoice</th><th>E-Way Bill</th></tr>`
+      : `<tr><th>Bill No</th><th>Date</th><th>Vendor</th><th>Vendor Inv.</th><th style="text-align:right;">Net</th><th>Status</th></tr>`;
+    const body = rows.map(r => isSales ? salesRow(r) : purchaseRow(r)).join('');
+    listEl.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+
+    if (isSales) {
+      listEl.querySelectorAll('[data-ei]').forEach(b => b.addEventListener('click', () => openEInvoice(Number(b.dataset.ei), b.dataset.no)));
+      listEl.querySelectorAll('[data-ewb]').forEach(b => b.addEventListener('click', () => openEWayBill(Number(b.dataset.ewb), b.dataset.no)));
+    }
+    listEl.querySelectorAll('[data-print]').forEach(b =>
+      b.addEventListener('click', () => window.open(`/print.html?type=${isSales ? 'sales' : 'purchase'}&id=${b.dataset.print}`, '_blank')));
+  }
+
+  function statusPill(s) {
+    const cls = s === 'Posted' ? 'ok' : s === 'Cancelled' ? 'warn' : '';
+    return `<span class="badge ${cls}">${esc(s || 'Posted')}</span>`;
+  }
+  function salesRow(r) {
+    const posted = r.Status === 'Posted';
+    const ei = r.EInvoiceStatus === 'Generated'
+      ? `<span class="badge ok" title="IRN ${esc(r.IRN || '')}">IRN ✓</span>`
+      : (posted ? `<button class="btn secondary" style="padding:4px 10px;font-size:.75rem;" data-ei="${r.InvoiceID}" data-no="${esc(r.InvoiceNo)}">Generate</button>` : '<span class="muted">—</span>');
+    const ewb = r.EWayBillStatus === 'Generated'
+      ? `<span class="badge ok" title="Valid to ${esc(r.EWayBillValidUpto || '')}">EWB ${esc(r.EWayBillNo || '')}</span>`
+      : (posted ? `<button class="btn secondary" style="padding:4px 10px;font-size:.75rem;" data-ewb="${r.InvoiceID}" data-no="${esc(r.InvoiceNo)}">Generate</button>` : '<span class="muted">—</span>');
+    return `<tr>
+      <td><a href="#" data-print="${r.InvoiceID}">${esc(r.InvoiceNo)}</a></td>
+      <td>${fmtDate(r.InvoiceDate)}</td><td>${esc(r.CustomerName)}</td>
+      <td style="text-align:right;">${fmtMoney(r.NetAmount)}</td><td>${statusPill(r.Status)}</td>
+      <td>${canCompliance ? ei : '<span class="muted">—</span>'}</td>
+      <td>${canCompliance ? ewb : '<span class="muted">—</span>'}</td></tr>`;
+  }
+  function purchaseRow(r) {
+    return `<tr>
+      <td><a href="#" data-print="${r.PurchaseID}">${esc(r.PurchaseNo)}</a></td>
+      <td>${fmtDate(r.PurchaseDate)}</td><td>${esc(r.SupplierName)}</td>
+      <td>${esc(r.VendorInvoiceNo || '')}</td>
+      <td style="text-align:right;">${fmtMoney(r.NetAmount)}</td><td>${statusPill(r.Status)}</td></tr>`;
+  }
+
+  // ---- E-invoice modal ----
+  const modal = document.getElementById('eiModal');
+  document.getElementById('eiClose').addEventListener('click', () => modal.style.display = 'none');
+  function showModal(title, html) { document.getElementById('eiTitle').textContent = title; document.getElementById('eiBody').innerHTML = html; modal.style.display = 'flex'; }
+
+  async function openEInvoice(id, no) {
+    showModal(`E-Invoice — ${no}`, '<p class="muted">Generating IRN…</p>');
+    try {
+      const r = await api(`/einvoice/sales/${id}/generate`, { method: 'POST', body: {} });
+      showModal(`E-Invoice — ${esc(no)}`, `
+        <p><strong>IRN</strong><br><code style="word-break:break-all;">${esc(r.irn)}</code></p>
+        <p><strong>Ack No:</strong> ${esc(r.ackNo)} &nbsp; <strong>Ack Date:</strong> ${esc(r.ackDate)}</p>
+        <p><strong>Mode:</strong> <span class="badge warn">${esc(r.mode)}</span> <span class="muted">(no live GSP connected)</span></p>
+        <p><strong>Signed QR (base64):</strong><br><textarea readonly rows="3" style="width:100%;">${esc(r.signedQR)}</textarea></p>`);
+      toast(`IRN generated for ${no}`, 'success');
+      load();
+    } catch (e) {
+      showModal(`E-Invoice — ${esc(no)}`, `<p class="error-text">${esc(e.message)}</p>`);
+    }
+  }
+  async function openEWayBill(id, no) {
+    // Ask for distance + vehicle first.
+    showModal(`E-Way Bill — ${esc(no)}`, `
+      <div class="form-grid">
+        <div><label>Distance (km)</label><input id="ewbDist" type="number" min="1" value="100" /></div>
+        <div><label>Vehicle No.</label><input id="ewbVeh" placeholder="OD02AB1234" /></div>
+      </div>
+      <div id="ewbMsg" class="muted" style="margin-top:8px;"></div>
+      <button class="btn" id="ewbGo" style="margin-top:10px;">Generate e-way bill</button>`);
+    try {
+      const req = await api(`/ewaybill/sales/${id}/required`);
+      document.getElementById('ewbMsg').textContent = req.reason;
+    } catch (e) { /* ignore */ }
+    document.getElementById('ewbGo').addEventListener('click', async () => {
+      const distance = Number(document.getElementById('ewbDist').value) || 1;
+      const vehicleNo = document.getElementById('ewbVeh').value;
+      try {
+        const r = await api(`/ewaybill/sales/${id}/generate`, { method: 'POST', body: { distance, vehicleNo, transMode: '1' } });
+        showModal(`E-Way Bill — ${esc(no)}`, `
+          <p><strong>E-Way Bill No:</strong> ${esc(r.ewbNo)}</p>
+          <p><strong>Generated:</strong> ${esc(r.ewbDate)}<br><strong>Valid upto:</strong> ${esc(r.validUpto)}</p>
+          <p><strong>Distance:</strong> ${esc(String(r.distance))} km</p>
+          <p><strong>Mode:</strong> <span class="badge warn">${esc(r.mode)}</span> <span class="muted">(no live EWB portal connected)</span></p>`);
+        toast(`E-way bill ${r.ewbNo} generated`, 'success');
+        load();
+      } catch (e) {
+        document.getElementById('ewbMsg').innerHTML = `<span class="error-text">${esc(e.message)}</span>`;
+      }
+    });
+  }
+
+  ['fFrom', 'fTo', 'fStatus'].forEach(id => document.getElementById(id).addEventListener('change', load));
+  partySelect.addEventListener('change', load);
+  document.getElementById('fClear').addEventListener('click', () => {
+    document.getElementById('fFrom').value = ''; document.getElementById('fTo').value = '';
+    document.getElementById('fStatus').value = ''; partySelect.value = ''; load();
+  });
+
+  await loadParties();
+  await load();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CRM - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('crm');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>CRM</h2>
+    <p class="muted">Track leads from first contact to a won deal. Winning a lead converts it into a customer master, so the next invoice can be raised against it immediately.</p>
+    <div class="form-grid" style="margin-top:14px;">
+      <div id="branchFilterWrap"></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;" id="tabBar"></div>
+  </div>
+  <div id="tabContent"></div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const CRM_ROLES = ['Super Admin', 'Company Admin', 'Branch Manager', 'Sales Executive', 'Auditor'];
+  if (!CRM_ROLES.includes(user.role)) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have access to CRM.</p></div>';
+    return;
+  }
+  const canWrite = user.role !== 'Auditor';
+  const STAGES = ['New', 'Contacted', 'Qualified', 'Proposal', 'Won', 'Lost'];
+
+  let branches = await buildBranchFilter(document.getElementById('branchFilterWrap'), render);
+
+  const TABS = ['Pipeline', 'All Leads', 'Follow-ups', 'Branch Performance'];
+  let activeTab = 'Pipeline';
+  buildTabBar(document.getElementById('tabBar'), TABS, activeTab, (t) => { activeTab = t; render(); });
+
+  async function render() {
+    const target = document.getElementById('tabContent');
+    target.innerHTML = '<div class="card"><p class="muted">Loading…</p></div>';
+    try {
+      if (activeTab === 'Pipeline') await renderPipeline(target);
+      else if (activeTab === 'All Leads') await renderLeads(target);
+      else if (activeTab === 'Follow-ups') await renderFollowups(target);
+      else if (activeTab === 'Branch Performance') await renderBranchPerf(target);
+      attachHoverEffects();
+    } catch (e) {
+      target.innerHTML = `<div class="card"><p class="error-text">${esc(e.message)}</p></div>`;
+      toast(e.message, 'error');
+    }
+  }
+
+  // ---------------- Pipeline (funnel) ----------------
+  async function renderPipeline(target) {
+    const [d, leads] = await Promise.all([
+      api('/crm/pipeline', { params: { branchId: selectedBranch() } }),
+      api('/crm/leads', { params: { branchId: selectedBranch(), pageSize: 200 } }).then(rowsOf)
+    ]);
+    const maxCount = Math.max(1, ...d.pipeline.map(p => p.count));
+
+    target.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="label">Open leads</div><div class="value">${d.openLeads}</div><div class="sub">still in play</div></div>
+        <div class="kpi-card"><div class="label">Open value</div><div class="value" data-count="${d.openValue}"></div><div class="sub">estimated</div></div>
+        <div class="kpi-card"><div class="label">Won value</div><div class="value" data-count="${d.wonValue}"></div><div class="sub">closed deals</div></div>
+        <div class="kpi-card"><div class="label">Conversion</div><div class="value">${d.conversionRate}%</div><div class="sub">of ${d.closedCount} closed leads</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Pipeline</h2>
+        <div class="funnel">
+          ${d.pipeline.map(p => `
+            <div class="funnel-row">
+              <div class="funnel-stage">${p.stage}</div>
+              <div class="funnel-bar-wrap">
+                <div class="funnel-bar stage-${p.stage.toLowerCase()}" style="width:${(p.count / maxCount) * 100}%"></div>
+              </div>
+              <div class="funnel-meta">${p.count} · ${fmtMoney(p.value)}</div>
+            </div>`).join('')}
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Lead board</h2>
+        <div class="kanban">
+          ${STAGES.map(stage => {
+            const inStage = leads.filter(l => l.Stage === stage);
+            return `
+              <div class="kanban-col">
+                <div class="kanban-head"><span>${stage}</span><span class="badge ${stage === 'Won' ? 'ok' : stage === 'Lost' ? 'warn' : ''}">${inStage.length}</span></div>
+                ${inStage.length === 0 ? '<p class="muted" style="font-size:0.8rem;">—</p>' : inStage.map(l => `
+                  <div class="kanban-card" data-lead="${esc(l.LeadID)}">
+                    <strong>${escapeHtml(l.LeadName)}</strong>
+                    <div class="muted" style="font-size:0.78rem;">${escapeHtml(l.ContactPerson || l.Mobile || '')}</div>
+                    <div style="font-size:0.82rem;margin-top:5px;">${fmtMoney(l.EstimatedValue)}</div>
+                    <div class="muted" style="font-size:0.72rem;margin-top:4px;">${esc(l.BranchCode)}${l.NextFollowUp ? ' · follow up ' + fmtDate(l.NextFollowUp) : ''}</div>
+                  </div>`).join('')}
+              </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+
+    target.querySelectorAll('.kpi-card .value[data-count]').forEach(n => animateCounter(n, Number(n.dataset.count), fmtMoney));
+    target.querySelectorAll('[data-lead]').forEach(c => c.addEventListener('click', () => openLead(c.dataset.lead)));
+  }
+
+  // ---------------- All leads ----------------
+  async function renderLeads(target) {
+    const leads = await api('/crm/leads', { params: { branchId: selectedBranch(), pageSize: 200 } }).then(rowsOf);
+    target.innerHTML = `
+      ${canWrite ? `
+      <div class="card">
+        <h2>Add a lead</h2>
+        <form id="leadForm">
+          <div class="form-grid">
+            ${user.branchId ? '' : `<div><label>Branch *</label><select name="branchId" required>${branches.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('')}</select></div>`}
+            <div><label>Lead / company name *</label><input name="leadName" required /></div>
+            <div><label>Contact person</label><input name="contactPerson" /></div>
+            <div><label>Mobile</label><input name="mobile" /></div>
+            <div><label>Email</label><input name="email" type="email" /></div>
+            <div><label>Source</label>
+              <select name="source">
+                <option value="">—</option>
+                <option>Walk-in</option><option>Referral</option><option>Website</option>
+                <option>Cold Call</option><option>Exhibition</option>
+              </select>
+            </div>
+            <div><label>Estimated value</label><input name="estimatedValue" type="number" step="0.01" value="0" /></div>
+            <div><label>Next follow-up</label><input name="nextFollowUp" type="date" /></div>
+          </div>
+          <label style="margin-top:10px;display:block;">Notes</label>
+          <textarea name="notes" rows="2"></textarea>
+          <button class="btn" type="submit" data-loading-text="Saving…" style="margin-top:14px;">Add lead</button>
+        </form>
+      </div>` : ''}
+
+      <div class="card">
+        <h2>Leads (${leads.length})</h2>
+        ${renderTable(leads.map(l => ({
+          Name: l.LeadName, Contact: l.ContactPerson || l.Mobile || '—', Source: l.Source || '—',
+          Stage: `<span class="badge ${l.Stage === 'Won' ? 'ok' : l.Stage === 'Lost' ? 'warn' : ''}">${esc(l.Stage)}</span>`,
+          Value: fmtMoney(l.EstimatedValue), Branch: l.BranchCode,
+          'Follow-up': l.NextFollowUp ? fmtDate(l.NextFollowUp) : '—',
+          Actions: `<button class="btn secondary" data-lead="${esc(l.LeadID)}" style="padding:6px 12px;">Open</button>`
+        })), [
+          { key: 'Name', label: 'Lead' }, { key: 'Contact', label: 'Contact' }, { key: 'Source', label: 'Source' },
+          { key: 'Stage', label: 'Stage', render: r => r.Stage }, { key: 'Value', label: 'Value', align: 'right' },
+          { key: 'Branch', label: 'Branch' }, { key: 'Follow-up', label: 'Follow-up' },
+          { key: 'Actions', label: '', render: r => r.Actions }
+        ], 'No leads yet.')}
+      </div>`;
+
+    const form = document.getElementById('leadForm');
+    if (form) {
+      const submit = form.querySelector('button[type=submit]');
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        withLoading(submit, async () => {
+          const body = Object.fromEntries(new FormData(form).entries());
+          try {
+            await api('/crm/leads', { method: 'POST', body });
+            toast(`${esc(body.leadName)} added to the pipeline`, 'success');
+            showSuccessBurst('Lead added');
+            render();
+          } catch (err) { toast(err.message, 'error'); }
+        })();
+      });
+    }
+    target.querySelectorAll('[data-lead]').forEach(b => b.addEventListener('click', () => openLead(b.dataset.lead)));
+  }
+
+  // ---------------- Lead detail ----------------
+  async function openLead(leadId) {
+    try {
+      const { lead, activities } = await api(`/crm/leads/${leadId}`);
+      const isClosed = ['Won', 'Lost'].includes(lead.Stage);
+      const modal = openModal(escapeHtml(lead.LeadName), `
+        <p class="muted">
+          ${escapeHtml(lead.ContactPerson || '')} ${lead.Mobile ? '· ' + escapeHtml(lead.Mobile) : ''} ${lead.Email ? '· ' + escapeHtml(lead.Email) : ''}<br/>
+          ${esc(lead.BranchName)} · ${esc(lead.Source) || 'no source'} · ${fmtMoney(lead.EstimatedValue)}
+          ${lead.OwnerName ? '· owned by ' + escapeHtml(lead.OwnerName) : ''}
+        </p>
+        <p><span class="badge ${lead.Stage === 'Won' ? 'ok' : lead.Stage === 'Lost' ? 'warn' : ''}">${esc(lead.Stage)}</span>
+        ${lead.LostReason ? `<span class="muted"> — ${escapeHtml(lead.LostReason)}</span>` : ''}
+        ${lead.ConvertedCustomerID ? `<span class="muted"> — converted to customer #${esc(lead.ConvertedCustomerID)}</span>` : ''}</p>
+
+        ${canWrite ? `
+        <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px;">
+          <label>Move to stage</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <select id="stageSelect" style="max-width:200px;">${STAGES.filter(s => s !== lead.Stage).map(s => `<option>${s}</option>`).join('')}</select>
+            <input id="stageNote" placeholder="Note / reason" style="flex:1;min-width:160px;" />
+            <button class="btn" id="stageBtn" data-loading-text="Moving…">Move</button>
+          </div>
+        </div>
+
+        <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px;">
+          <label>Log an activity</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <select id="actType" style="max-width:140px;"><option>Call</option><option>Email</option><option>Meeting</option><option>Note</option></select>
+            <input id="actNotes" placeholder="What happened?" style="flex:1;min-width:160px;" />
+            <input id="actNext" type="date" style="max-width:170px;" />
+            <button class="btn" id="actBtn" data-loading-text="Saving…">Log</button>
+          </div>
+        </div>
+
+        ${!lead.ConvertedCustomerID ? `
+        <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px;">
+          <label>Convert to a customer</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input id="convGstin" placeholder="GSTIN (optional)" style="flex:1;min-width:150px;" />
+            <input id="convState" placeholder="State" style="max-width:160px;" />
+            <button class="btn" id="convBtn" data-loading-text="Converting…">Convert &amp; mark Won</button>
+          </div>
+        </div>` : ''}
+        ` : ''}
+
+        <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px;">
+          <label>History</label>
+          <div class="timeline">
+            ${activities.map(a => `
+              <div class="timeline-item">
+                <div><strong>${esc(a.ActivityType)}</strong> <span class="muted">${fmtDate(a.CreatedAt)}${a.CreatedByName ? ' · ' + escapeHtml(a.CreatedByName) : ''}</span></div>
+                <div>${escapeHtml(a.Notes || '')}</div>
+              </div>`).join('') || '<p class="muted">No activity yet.</p>'}
+          </div>
+        </div>
+        <button class="btn secondary" id="closeLead" style="margin-top:16px;">Close</button>
+      `);
+
+      modal.querySelector('#closeLead').addEventListener('click', closeModal);
+
+      const stageBtn = modal.querySelector('#stageBtn');
+      if (stageBtn) stageBtn.addEventListener('click', withLoading(stageBtn, async () => {
+        const stage = modal.querySelector('#stageSelect').value;
+        const note = modal.querySelector('#stageNote').value;
+        try {
+          await api(`/crm/leads/${leadId}/stage`, { method: 'POST', body: { stage, notes: note, lostReason: stage === 'Lost' ? (note || 'Not specified') : undefined } });
+          toast(`Moved to ${stage}`, 'success');
+          closeModal(); render();
+        } catch (e) { toast(e.message, 'error'); }
+      }));
+
+      const actBtn = modal.querySelector('#actBtn');
+      if (actBtn) actBtn.addEventListener('click', withLoading(actBtn, async () => {
+        try {
+          await api(`/crm/leads/${leadId}/activities`, { method: 'POST', body: {
+            activityType: modal.querySelector('#actType').value,
+            notes: modal.querySelector('#actNotes').value,
+            nextFollowUp: modal.querySelector('#actNext').value || undefined
+          } });
+          toast('Activity logged', 'success');
+          closeModal(); openLead(leadId);
+        } catch (e) { toast(e.message, 'error'); }
+      }));
+
+      const convBtn = modal.querySelector('#convBtn');
+      if (convBtn) convBtn.addEventListener('click', withLoading(convBtn, async () => {
+        try {
+          const r = await api(`/crm/leads/${leadId}/convert`, { method: 'POST', body: {
+            gstin: modal.querySelector('#convGstin').value || undefined,
+            state: modal.querySelector('#convState').value || undefined
+          } });
+          toast(`Converted — customer #${r.customerId} created`, 'success');
+          showSuccessBurst('Converted');
+          closeModal(); render();
+        } catch (e) { toast(e.message, 'error'); }
+      }));
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ---------------- Follow-ups ----------------
+  async function renderFollowups(target) {
+    const rows = await api('/crm/followups', { params: { branchId: selectedBranch() } });
+    target.innerHTML = `
+      <div class="card">
+        <h2>Follow-ups due (${rows.length})</h2>
+        <p class="muted">Open leads whose follow-up date is today or in the past.</p>
+        ${renderTable(rows.map(r => ({
+          Lead: r.LeadName, Contact: r.ContactPerson || r.Mobile || '—', Stage: r.Stage,
+          Due: `${fmtDate(r.NextFollowUp)} ${r.overdue ? '<span class="badge warn">Overdue</span>' : '<span class="badge ok">Today</span>'}`,
+          Value: fmtMoney(r.EstimatedValue), Branch: r.BranchName,
+          Actions: `<button class="btn secondary" data-lead="${esc(r.LeadID)}" style="padding:6px 12px;">Open</button>`
+        })), [
+          { key: 'Lead', label: 'Lead' }, { key: 'Contact', label: 'Contact' }, { key: 'Stage', label: 'Stage' },
+          { key: 'Due', label: 'Due', render: r => r.Due }, { key: 'Value', label: 'Value', align: 'right' },
+          { key: 'Branch', label: 'Branch' }, { key: 'Actions', label: '', render: r => r.Actions }
+        ], 'Nothing is due. Good place to be.')}
+      </div>`;
+    target.querySelectorAll('[data-lead]').forEach(b => b.addEventListener('click', () => openLead(b.dataset.lead)));
+  }
+
+  // ---------------- Branch performance ----------------
+  async function renderBranchPerf(target) {
+    const rows = await api('/crm/branch-performance');
+    target.innerHTML = `
+      <div class="card">
+        <h2>Branch performance</h2>
+        ${renderTable(rows.map(r => ({
+          Branch: `${esc(r.BranchName)} (${esc(r.BranchCode)})`, Leads: r.TotalLeads, Won: r.Won, Lost: r.Lost,
+          'Conversion': r.ConversionRate + '%', 'Won value': fmtMoney(r.WonValue), 'Open value': fmtMoney(r.OpenValue)
+        })), null, 'No leads recorded yet.')}
+      </div>`;
+  }
+
+
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Branches &amp; Users - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<script src="js/common.js"></script>
+<script>Auth.requireLogin(); renderShell('branches');</script>
+
+<template id="tpl">
+  <div class="card">
+    <h2>Add Branch</h2>
+    <form id="branchForm">
+      <div class="form-grid">
+        <div><label>Branch Name *</label><input name="branchName" required /></div>
+        <div><label>Branch Code * <span class="muted">(used for invoice numbering, e.g. HYD)</span></label><input name="branchCode" maxlength="6" required /></div>
+        <div><label>State</label><input name="state" /></div>
+        <div><label>GSTIN</label><input name="gstin" /></div>
+        <div><label>Phone</label><input name="phone" /></div>
+      </div>
+      <div id="branchError" class="error-text" style="display:none;"></div>
+      <button class="btn" type="submit" style="margin-top:14px;">Save Branch</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Branches</h2>
+    <div id="branchList"></div>
+  </div>
+
+  <div class="card">
+    <h2>Add User</h2>
+    <form id="userForm">
+      <div class="form-grid">
+        <div><label>Username *</label><input name="userName" required /></div>
+        <div><label>Full Name</label><input name="fullName" /></div>
+        <div><label>Email</label><input name="email" type="email" /></div>
+        <div><label>Password *</label><input name="password" type="password" required /></div>
+        <div><label>Role *</label><select name="roleId" id="roleSelect" required></select></div>
+        <div id="userBranchWrap" style="display:none;"><label>Branch</label><select name="branchId" id="userBranchSelect"></select></div>
+      </div>
+      <div id="userError" class="error-text" style="display:none;"></div>
+      <button class="btn" type="submit" style="margin-top:14px;">Create User</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="list-toolbar">
+      <h2 style="margin:0;">Users</h2>
+      <button class="btn secondary" id="importUsersBtn" style="display:none;">⬆ Import users from Excel / CSV</button>
+    </div>
+    <div id="userList"></div>
+  </div>
+</template>
+
+<script>
+(async function () {
+  const content = document.getElementById('page-content');
+  content.appendChild(document.getElementById('tpl').content.cloneNode(true));
+  const user = Auth.getUser();
+  const canManage = ['Super Admin', 'Company Admin', 'Branch Manager'].includes(user.role);
+
+  if (!canManage) {
+    content.innerHTML = '<div class="card"><p class="muted">You do not have permission to manage branches or users.</p></div>';
+    return;
+  }
+
+  document.getElementById('branchForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errBox = document.getElementById('branchError');
+    errBox.style.display = 'none';
+    const fd = new FormData(e.target);
+    const body = Object.fromEntries(fd.entries());
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalLabel = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `<span class="spinner"></span>Saving...`;
+    try {
+      await api('/branches', { method: 'POST', body });
+      e.target.reset();
+      toast('Branch created.', 'success');
+      await loadBranches();
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.style.display = 'block';
+      toast(err.message, 'error');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalLabel;
+    }
+  });
+
+  async function loadBranches() {
+    const rows = await api('/branches');
+    const target = document.getElementById('branchList');
+    target.innerHTML = `
+      <table>
+        <thead><tr><th>Name</th><th>Code</th><th>State</th><th>Head Office</th><th>Status</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${esc(r.BranchName)}</td><td>${esc(r.BranchCode)}</td><td>${esc(r.State) || ''}</td><td>${r.IsHeadOffice ? 'Yes' : 'No'}</td><td><span class="badge ${r.IsActive ? 'ok' : 'warn'}">${r.IsActive ? 'Active' : 'Inactive'}</span></td></tr>`).join('')}</tbody>
+      </table>`;
+
+    if (!user.branchId) {
+      document.getElementById('userBranchWrap').style.display = 'block';
+      document.getElementById('userBranchSelect').innerHTML = rows.map(b => `<option value="${esc(b.BranchID)}">${esc(b.BranchName)} (${esc(b.BranchCode)})</option>`).join('');
+    }
+  }
+
+  async function loadRoles() {
+    const roles = await api('/branches/roles/list');
+    document.getElementById('roleSelect').innerHTML = roles.map(r => `<option value="${esc(r.RoleID)}">${esc(r.RoleName)}</option>`).join('');
+  }
+
+  document.getElementById('userForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errBox = document.getElementById('userError');
+    errBox.style.display = 'none';
+    const fd = new FormData(e.target);
+    const body = Object.fromEntries(fd.entries());
+    body.roleId = Number(body.roleId);
+    if (body.branchId) body.branchId = Number(body.branchId);
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalLabel = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = `<span class="spinner"></span>Creating...`;
+    try {
+      await api('/branches/users', { method: 'POST', body });
+      e.target.reset();
+      toast('User account created and saved.', 'success');
+      await loadUsers();
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.style.display = 'block';
+      toast(err.message, 'error');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalLabel;
+    }
+  });
+
+  async function loadUsers() {
+    const rows = await api('/branches/users/list');
+    const target = document.getElementById('userList');
+    const canToggle = ['Super Admin', 'Company Admin'].includes(user.role);
+    target.innerHTML = `
+      <table>
+        <thead><tr><th>Username</th><th>Full Name</th><th>Role</th><th>Branch</th><th>Status</th>${canToggle ? '<th>Action</th>' : ''}</tr></thead>
+        <tbody>${rows.map(r => `
+          <tr>
+            <td>${esc(r.UserName)}</td>
+            <td>${esc(r.FullName) || ''}</td>
+            <td>${esc(r.RoleName)}</td>
+            <td>${esc(r.BranchName) || 'All Branches'}</td>
+            <td><span class="badge ${r.Status === 'Active' ? 'ok' : 'warn'}">${esc(r.Status)}</span></td>
+            ${canToggle ? `<td>
+              <button class="btn secondary user-toggle-btn" data-id="${esc(r.UserID)}" data-status="${esc(r.Status)}" style="padding:5px 12px;font-size:0.78rem;">
+                ${r.Status === 'Active' ? 'Deactivate' : 'Reactivate'}
+              </button>
+              <button class="btn secondary user-reset-btn" data-id="${esc(r.UserID)}" data-name="${esc(r.UserName)}" style="padding:5px 12px;font-size:0.78rem;">
+                Reset password
+              </button>
+            </td>` : ''}
+          </tr>
+        `).join('')}</tbody>
+      </table>`;
+
+    // Admin password reset - for someone locked out who can't use the
+    // self-service "Forgot password?" flow.
+    target.querySelectorAll('.user-reset-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const modal = openModal(`Reset password for ${esc(btn.dataset.name)}`, `
+          <p class="muted">Set a temporary password and pass it to them directly. Ask them to change it themselves
+            from the Password button in the top bar as soon as they sign in.</p>
+          <label>New password *</label>
+          <input type="password" id="rpNew" placeholder="At least 8 characters" autocomplete="new-password" />
+          <div id="rpError" class="error-text" style="display:none;"></div>
+          <div style="display:flex;gap:8px;margin-top:16px;">
+            <button class="btn" id="rpSave" data-loading-text="Resetting…">Reset password</button>
+            <button class="btn secondary" id="rpCancel">Cancel</button>
+          </div>`);
+        modal.querySelector('#rpCancel').addEventListener('click', closeModal);
+        const save = modal.querySelector('#rpSave');
+        save.addEventListener('click', withLoading(save, async () => {
+          const errBox = modal.querySelector('#rpError');
+          errBox.style.display = 'none';
+          const pw = modal.querySelector('#rpNew').value;
+          if (!pw || pw.length < 8) {
+            errBox.textContent = 'The password must be at least 8 characters.';
+            errBox.style.display = 'block';
+            return;
+          }
+          try {
+            const r = await api(`/branches/users/${btn.dataset.id}/reset-password`, { method: 'POST', body: { newPassword: pw } });
+            closeModal();
+            toast(r.message, 'success');
+          } catch (e) {
+            errBox.textContent = e.message;
+            errBox.style.display = 'block';
+          }
+        }));
+      });
+    });
+
+    target.querySelectorAll('.user-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        const currentStatus = btn.dataset.status;
+        const nextStatus = currentStatus === 'Active' ? 'Inactive' : 'Active';
+        const verb = nextStatus === 'Active' ? 'reactivate' : 'deactivate';
+        if (!confirm(`Are you sure you want to ${verb} this user?`)) return;
+
+        const original = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner dark"></span>`;
+        try {
+          await api(`/branches/users/${id}/status`, { method: 'PATCH', body: { status: nextStatus } });
+          toast(`User ${nextStatus === 'Active' ? 'reactivated' : 'deactivated'}.`, 'success');
+          await loadUsers();
+          attachHoverEffects();
+        } catch (err) {
+          toast(err.message, 'error');
+          btn.disabled = false;
+          btn.innerHTML = original;
+        }
+      });
+    });
+  }
+
+  await loadBranches();
+  await loadRoles();
+  // ---- Bulk import of users ----
+  // Creating logins in bulk is restricted to the two admin roles server-side;
+  // hiding the button for everyone else just avoids offering a 403.
+  if (['Super Admin', 'Company Admin'].includes(user.role)) {
+    const importBtn = document.getElementById('importUsersBtn');
+    importBtn.style.display = '';
+    importBtn.addEventListener('click', () => openImportDialog({
+      title: 'Import users from a spreadsheet',
+      endpoint: '/branches/users/import',
+      templateUrl: '/branches/users/import/template.csv',
+      hint: 'Recognised columns: UserName (required), Full Name, Email, Role (required — must match an existing role), Branch (name or code; blank means head office), Password. Leave Password blank and one is generated and shown to you once. A username that already exists is skipped.',
+      onDone: loadUsers
+    }));
+  }
+
+  await loadUsers();
+  attachHoverEffects();
+})();
+</script>
+</body>
+</html>

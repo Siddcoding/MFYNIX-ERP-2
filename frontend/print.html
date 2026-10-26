@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Invoice - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+<style>
+  /* The printable document deliberately breaks out of the app's dark glass
+     theme: an invoice is a black-on-white document that has to survive being
+     printed, saved as PDF and emailed. */
+  body { background: #fff; color: #111; }
+  .doc-wrap { max-width: 820px; margin: 24px auto; padding: 0 16px; }
+  .doc {
+    background: #fff; color: #111; border: 1px solid #d5d9e0; border-radius: 6px;
+    padding: 34px; font-size: 13px; line-height: 1.5;
+  }
+  .doc h1 { font-size: 20px; margin: 0 0 2px; color: #111; letter-spacing: -0.01em; }
+  .doc h2 { font-size: 13px; margin: 0 0 8px; color: #111; text-transform: uppercase; letter-spacing: 0.06em; }
+  .doc .muted { color: #666; }
+  .doc-head { display: flex; justify-content: space-between; gap: 24px; border-bottom: 2px solid #111; padding-bottom: 16px; margin-bottom: 18px; }
+  .doc-title { text-align: right; }
+  .doc-title .kind { font-size: 17px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+  .parties { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 20px; }
+  .party { border: 1px solid #e2e5ea; border-radius: 4px; padding: 12px; }
+  .party .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #777; margin-bottom: 5px; }
+  .party strong { font-size: 14px; }
+  .doc table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+  .doc th, .doc td { border: 1px solid #d9dde3; padding: 7px 9px; text-align: left; color: #111; background: #fff; }
+  .doc th { background: #f2f4f7; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .doc td.num, .doc th.num { text-align: right; }
+  .totals { width: 300px; margin-left: auto; }
+  .totals td { border: none; padding: 4px 0; }
+  .totals tr.grand td { border-top: 2px solid #111; font-weight: 700; font-size: 15px; padding-top: 8px; }
+  .words { margin-top: 14px; padding: 9px 11px; background: #f7f8fa; border-radius: 4px; font-size: 12px; }
+  .sign { display: flex; justify-content: space-between; margin-top: 46px; font-size: 12px; }
+  .sign div { text-align: center; border-top: 1px solid #999; padding-top: 6px; width: 200px; }
+  .cancel-stamp {
+    border: 3px solid #c00; color: #c00; font-size: 26px; font-weight: 800;
+    letter-spacing: 0.1em; padding: 6px 22px; transform: rotate(-8deg);
+    display: inline-block; margin-bottom: 14px;
+  }
+  .toolbar { max-width: 820px; margin: 18px auto 0; padding: 0 16px; display: flex; gap: 8px; }
+  /* The statutory reference strip: transport, order and e-invoice details that
+     have to appear on the face of the document. Laid out as a compact grid so
+     it costs a couple of lines rather than half a page. */
+  .refs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px 14px; font-size: 11px;
+          border: 1px solid #e2e5ea; border-radius: 4px; padding: 10px 12px; margin-bottom: 16px; }
+  .refs .k { color: #777; text-transform: uppercase; letter-spacing: 0.05em; font-size: 9px; display: block; }
+  .refs .v { font-weight: 600; }
+  .doc-brand { display: flex; gap: 12px; align-items: flex-start; }
+  .doc th, .doc td { font-size: 11px; padding: 6px 7px; }
+  .batchline { color: #666; font-size: 10px; }
+  @media (max-width: 640px) { .refs { grid-template-columns: repeat(2, 1fr); } }
+  /* Everything except the document itself disappears when printing. */
+  @media print {
+    .toolbar, .aurora-bg { display: none !important; }
+    body { background: #fff; }
+    .doc-wrap { margin: 0; padding: 0; max-width: none; }
+    .doc { border: none; padding: 0; }
+    @page { margin: 14mm; }
+  }
+</style>
+</head>
+<body>
+<script src="js/common.js"></script>
+<div class="toolbar">
+  <button class="btn" id="printBtn">Print / Save as PDF</button>
+  <button class="btn secondary" id="backBtn">Back</button>
+</div>
+<div class="doc-wrap"><div class="doc" id="doc"><p class="muted">Loading…</p></div></div>
+
+<script>
+(async function () {
+  Auth.requireLogin();
+  const params = new URLSearchParams(location.search);
+  const type = params.get('type') === 'purchase' ? 'purchase' : 'sales';
+  const id = params.get('id');
+
+  document.getElementById('printBtn').addEventListener('click', () => window.print());
+  document.getElementById('backBtn').addEventListener('click', () => {
+    history.length > 1 ? history.back() : (location.href = type === 'sales' ? '/sales.html' : '/purchase.html');
+  });
+
+
+  // Amount in words - required on a GST tax invoice in India.
+  function amountInWords(num) {
+    const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
+      'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+    const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+    function twoDigit(n) {
+      if (n < 20) return ones[n];
+      return tens[Math.floor(n / 10)] + (n % 10 ? ' ' + ones[n % 10] : '');
+    }
+    // Indian numbering: crore, lakh, thousand, hundred.
+    function convert(n) {
+      if (n === 0) return 'Zero';
+      let out = '';
+      const crore = Math.floor(n / 10000000); n %= 10000000;
+      const lakh = Math.floor(n / 100000); n %= 100000;
+      const thousand = Math.floor(n / 1000); n %= 1000;
+      const hundred = Math.floor(n / 100); n %= 100;
+      if (crore) out += twoDigit(crore) + ' Crore ';
+      if (lakh) out += twoDigit(lakh) + ' Lakh ';
+      if (thousand) out += twoDigit(thousand) + ' Thousand ';
+      if (hundred) out += ones[hundred] + ' Hundred ';
+      if (n) out += (out ? 'and ' : '') + twoDigit(n);
+      return out.trim();
+    }
+    const rupees = Math.floor(Math.abs(num));
+    const paise = Math.round((Math.abs(num) - rupees) * 100);
+    let s = convert(rupees) + ' Rupees';
+    if (paise) s += ' and ' + twoDigit(paise) + ' Paise';
+    return s + ' Only';
+  }
+
+  try {
+    const d = await api(`/${type}/${id}`);
+    const h = d.header;
+    const isSales = type === 'sales';
+
+    // The tax heads are SUMMED FROM THE STORED LINES, not recomputed here.
+    // They were worked out once when the document was posted and are what the
+    // GST return will carry, so a printed invoice cannot drift from the filing
+    // however the state masters are edited afterwards.
+    const sum = (f) => Math.round(d.lines.reduce((t, l) => t + (Number(l[f]) || 0), 0) * 100) / 100;
+    const cgst = sum('CGSTAmount'), sgst = sum('SGSTAmount'), igst = sum('IGSTAmount');
+    const totalDisc = sum('Discount');
+
+    const sellerState = isSales ? h.BranchState : h.SupplierState;
+    const buyerState = h.PartyState || (isSales ? h.CustomerState : h.BranchState);
+    // Older documents, posted before the heads were stored, fall back to the
+    // place-of-supply comparison rather than showing nothing.
+    const storedHeads = (cgst + sgst + igst) > 0;
+    const interState = storedHeads
+      ? igst > 0
+      : !!(sellerState && buyerState && String(sellerState).trim().toLowerCase() !== String(buyerState).trim().toLowerCase());
+    const half = h.GST / 2;
+    const showCgst = storedHeads ? cgst : (interState ? 0 : half);
+    const showSgst = storedHeads ? sgst : (interState ? 0 : half);
+    const showIgst = storedHeads ? igst : (interState ? h.GST : 0);
+
+    const seller = isSales
+      ? { name: h.CompanyName, sub: h.BranchName, gstin: h.BranchGSTIN || h.CompanyGSTIN, addr: h.BranchAddress, state: h.BranchState, phone: h.BranchPhone }
+      : { name: h.SupplierName, sub: '', gstin: h.SupplierGSTIN, addr: h.SupplierAddress, state: h.SupplierState, phone: '' };
+    const buyer = isSales
+      ? { name: h.CustomerName, gstin: h.CustomerGSTIN, addr: h.CustomerAddress, state: h.CustomerState, phone: h.CustomerMobile }
+      : { name: `${esc(h.CompanyName)} — ${esc(h.BranchName)}`, gstin: h.BranchGSTIN || h.CompanyGSTIN, addr: h.BranchAddress, state: h.BranchState, phone: '' };
+
+    // Rate-wise tax table (OTC-01): taxable value and each tax head grouped by GST rate,
+    // summed from the stored lines like the totals above.
+    const rateMap = new Map();
+    d.lines.forEach(l => {
+      const rate = Number(l.GST || 0);
+      const nett = l.NettAmount !== undefined && l.NettAmount !== null ? Number(l.NettAmount) : (l.Qty * l.Rate - (l.Discount || 0));
+      const r = rateMap.get(rate) || { rate, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+      r.taxable += nett; r.cgst += Number(l.CGSTAmount || 0); r.sgst += Number(l.SGSTAmount || 0); r.igst += Number(l.IGSTAmount || 0);
+      rateMap.set(rate, r);
+    });
+    const rateRows = [...rateMap.values()].sort((a, b) => a.rate - b.rate);
+
+    const docNo = isSales ? h.InvoiceNo : h.PurchaseNo;
+    const docDate = isSales ? h.InvoiceDate : h.PurchaseDate;
+
+    // The company's own logo if they have uploaded one, otherwise the Mfynix
+    // mark — a document going to the customer's customer should carry their
+    // letterhead, not their software vendor's, the moment they upload one.
+    const branding = await loadBranding();
+    const logoSrc = (branding && branding.logoDataUrl) || MFYNIX_MARK;
+
+    // The statutory reference strip. Every entry is omitted when empty rather
+    // than printed as a blank label — an invoice cluttered with "Order No: —"
+    // is harder to read, not more complete.
+    const refs = [
+      ['Reference', h.RefNo && `${esc(h.RefNo)}${h.RefDate ? ' · ' + fmtDate(h.RefDate) : ''}`],
+      ['Order', h.OrderNo && `${esc(h.OrderNo)}${h.OrderDate ? ' · ' + fmtDate(h.OrderDate) : ''}`],
+      ['IRN', h.IRN && esc(h.IRN)],
+      ['E-Way Bill', h.EWayBillNo && esc(h.EWayBillNo)],
+      ['Transporter', h.TransporterName && esc(h.TransporterName)],
+      ['Consignment note', h.ConsignmentNo && `${esc(h.ConsignmentNo)}${h.ConsignmentDate ? ' · ' + fmtDate(h.ConsignmentDate) : ''}`],
+      ['Reverse charge', h.ReverseCharge ? 'Yes' : 'No'],
+      ['Payment', h.PayLedger && esc(h.PayLedger)],
+      ['Party type', h.PartyType && esc(h.PartyType)],
+      ['Party PAN', h.PartyPAN && esc(h.PartyPAN)],
+      ['State code', h.PartyStateCode && esc(h.PartyStateCode)],
+      ['Place of supply', h.PlaceOfSupply && esc(h.PlaceOfSupply)]
+    ].filter(([, v]) => v);
+    const refsHtml = refs.length
+      ? `<div class="refs">${refs.map(([k, v]) => `<div><span class="k">${k}</span><span class="v">${v}</span></div>`).join('')}</div>`
+      : '';
+
+    document.title = `${docNo} - Mfynix`;
+
+    document.getElementById('doc').innerHTML = `
+      ${h.Status === 'Cancelled' ? '<div class="cancel-stamp">Cancelled</div>' : ''}
+      <div class="doc-head">
+        <div class="doc-brand">
+          ${logoSrc ? `<img class="print-logo" src="${logoSrc}" alt="" />` : ''}
+          <div>
+          <h1>${esc(seller.name)}</h1>
+          ${seller.sub ? `<div class="muted">${esc(seller.sub)}</div>` : ''}
+          ${seller.addr ? `<div class="muted">${esc(seller.addr)}</div>` : ''}
+          <div class="muted">${seller.state ? esc(seller.state) : ''}${seller.phone ? ' · ' + esc(seller.phone) : ''}</div>
+          <div style="margin-top:5px;"><strong>GSTIN:</strong> ${esc(seller.gstin || '—')}</div>
+          </div>
+        </div>
+        <div class="doc-title">
+          <div class="kind">${isSales ? 'Tax Invoice' : 'Purchase Bill'}</div>
+          <div style="margin-top:8px;"><strong>No:</strong> ${esc(docNo)}</div>
+          <div><strong>Date:</strong> ${fmtDate(docDate)}</div>
+          ${h.DueDate ? `<div><strong>Due:</strong> ${fmtDate(h.DueDate)}${h.PaymentTermName ? ` <span class="muted">(${esc(h.PaymentTermName)})</span>` : ''}</div>` : ''}
+          <div class="muted" style="margin-top:4px;">${interState ? 'Inter-state supply (IGST)' : 'Intra-state supply (CGST + SGST)'}</div>
+        </div>
+      </div>
+
+      <div class="parties">
+        <div class="party">
+          <div class="lbl">${isSales ? 'Bill to' : 'Supplier'}</div>
+          <strong>${esc(isSales ? buyer.name : seller.name)}</strong>
+          <div class="muted">${esc((isSales ? buyer.addr : seller.addr) || '')}</div>
+          <div class="muted">${esc((isSales ? buyer.state : seller.state) || '')}</div>
+          <div style="margin-top:4px;">GSTIN: ${esc((isSales ? buyer.gstin : seller.gstin) || 'Unregistered')}</div>
+        </div>
+        <div class="party">
+          <div class="lbl">${isSales ? 'Place of supply' : 'Received at'}</div>
+          <strong>${esc(buyerState || sellerState || '—')}</strong>
+          ${!isSales ? `<div class="muted">${esc(h.BranchName)}</div>` : ''}
+          ${isSales && buyer.phone ? `<div class="muted">${esc(buyer.phone)}</div>` : ''}
+        </div>
+      </div>
+
+      ${refsHtml}
+
+      <table>
+        <thead>
+          <tr>
+            <th style="width:34px;">#</th><th>Item / Description</th><th>HSN</th>
+            <th class="num">Qty</th><th class="num">Rate</th>
+            <th class="num">Disc</th><th class="num">Taxable</th>
+            ${interState
+              ? '<th class="num">IGST</th>'
+              : '<th class="num">CGST</th><th class="num">SGST</th>'}
+            <th class="num">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${d.lines.map((l, i) => {
+            // The line's own snapshot wins over the live master: this is what
+            // the item was called and coded on the day the document was raised.
+            const desc = l.ItemDesc || l.ItemName;
+            const code = l.ItemCode;
+            const nett = l.NettAmount !== undefined && l.NettAmount !== null
+              ? l.NettAmount : (l.Qty * l.Rate - (l.Discount || 0));
+            // Batch and dates only print for the lines that actually carry
+            // them, so a business that doesn't track batches sees a clean table.
+            const trace = [
+              l.BatchNo && `Batch ${esc(l.BatchNo)}`,
+              l.MfgDate && `Mfg ${fmtDate(l.MfgDate)}`,
+              l.ExpDate && `Exp ${fmtDate(l.ExpDate)}`
+            ].filter(Boolean).join(' · ');
+            return `
+            <tr>
+              <td>${i + 1}</td>
+              <td>
+                ${code ? `<strong>${esc(code)}</strong> ` : ''}${esc(desc)}
+                ${trace ? `<div class="batchline">${trace}</div>` : ''}
+              </td>
+              <td>${esc(l.HSN || '—')}</td>
+              <td class="num">${esc(l.Qty)} ${esc(l.Unit || '')}</td>
+              <td class="num">${fmtMoney(l.Rate)}</td>
+              <td class="num">${l.DiscountPercent ? l.DiscountPercent + '%' : (l.Discount ? fmtMoney(l.Discount) : '—')}</td>
+              <td class="num">${fmtMoney(nett)}</td>
+              ${interState
+                ? `<td class="num">${fmtMoney(l.IGSTAmount || 0)}<div class="batchline">${l.IGSTPercent || l.GST || 0}%</div></td>`
+                : `<td class="num">${fmtMoney(l.CGSTAmount || 0)}<div class="batchline">${l.CGSTPercent || (l.GST || 0) / 2}%</div></td>
+                   <td class="num">${fmtMoney(l.SGSTAmount || 0)}<div class="batchline">${l.SGSTPercent || (l.GST || 0) / 2}%</div></td>`}
+              <td class="num">${fmtMoney(l.GrossAmount || l.Amount)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+
+      <table class="totals">
+        ${totalDisc > 0 ? `<tr><td>Discount</td><td class="num">− ${fmtMoney(totalDisc)}</td></tr>` : ''}
+        <tr><td>Taxable value</td><td class="num">${fmtMoney(h.Total)}</td></tr>
+        ${interState
+          ? `<tr><td>IGST</td><td class="num">${fmtMoney(showIgst)}</td></tr>`
+          : `<tr><td>CGST</td><td class="num">${fmtMoney(showCgst)}</td></tr>
+             <tr><td>SGST</td><td class="num">${fmtMoney(showSgst)}</td></tr>`}
+        <tr class="grand"><td>Total</td><td class="num">${fmtMoney(h.NetAmount)}</td></tr>
+      </table>
+
+      ${rateRows.length ? `
+      <table class="ratewise">
+        <thead><tr><th>GST rate</th><th class="num">Taxable value</th>
+          ${interState ? '<th class="num">IGST</th>' : '<th class="num">CGST</th><th class="num">SGST</th>'}
+          <th class="num">Total tax</th></tr></thead>
+        <tbody>${rateRows.map(r => `<tr><td>${esc(r.rate)}%</td><td class="num">${fmtMoney(r.taxable)}</td>
+          ${interState ? `<td class="num">${fmtMoney(r.igst)}</td>` : `<td class="num">${fmtMoney(r.cgst)}</td><td class="num">${fmtMoney(r.sgst)}</td>`}
+          <td class="num">${fmtMoney(r.cgst + r.sgst + r.igst)}</td></tr>`).join('')}</tbody>
+      </table>` : ''}
+
+      <div class="words"><strong>Amount in words:</strong> ${esc(amountInWords(h.NetAmount))}</div>
+
+      ${isSales && (h.BankName || h.BankAccountNo || h.DeclarationText) ? `
+      <div class="parties" style="margin-top:18px;">
+        ${h.BankName || h.BankAccountNo ? `<div class="party"><div class="lbl">Bank details</div>
+          ${h.BankName ? `<div><strong>${esc(h.BankName)}</strong>${h.BankBranch ? ` · ${esc(h.BankBranch)}` : ''}</div>` : ''}
+          ${h.BankAccountNo ? `<div>A/c no: ${esc(h.BankAccountNo)}</div>` : ''}
+          ${h.BankIFSC ? `<div>IFSC: ${esc(h.BankIFSC)}</div>` : ''}</div>` : '<div></div>'}
+        ${h.DeclarationText ? `<div class="party"><div class="lbl">Declaration</div><div style="font-size:11px;">${esc(h.DeclarationText)}</div></div>` : '<div></div>'}
+      </div>` : ''}
+
+      <div class="sign">
+        <div>Receiver's signature</div>
+        <div>For ${esc(seller.name)}<br/><span class="muted">Authorised signatory</span></div>
+      </div>
+
+      <p class="muted" style="margin-top:22px;font-size:11px;text-align:center;">
+        This is a computer-generated document from Mfynix.
+        ${h.Status === 'Cancelled' ? 'This document has been cancelled and is not valid for input tax credit.' : ''}
+      </p>`;
+  } catch (e) {
+    document.getElementById('doc').innerHTML = `<p style="color:#c00;">${esc(e.message)}</p>`;
+  }
+})();
+</script>
+</body>
+</html>

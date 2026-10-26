@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>My Account - Mfynix</title>
+<link rel="icon" type="image/png" href="img/favicon.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="portal-body">
+    <div class="portal-topbar">
+      <div>
+        <h1 id="portalCompany">…</h1>
+        <div class="portal-sub" id="portalWho"></div>
+      </div>
+      <div class="user-chip">
+        <button class="btn secondary" id="portalPwBtn">Password</button>
+        <button class="btn secondary" id="portalLogoutBtn">Log out</button>
+      </div>
+    </div>
+
+    <div id="accessBanner"></div>
+    <div class="portal-tabs" id="portalTabs"></div>
+    <div id="page-content"></div>
+  </div>
+
+  <script src="js/common.js"></script>
+  <script>
+  (async function () {
+    initAuroraBackground();
+    initRipples();
+
+    // A staff token must not open the portal, and vice versa - each lands on
+    // the screen built for it rather than on a page that half works.
+    const me = Auth.getUser();
+    if (!Auth.getToken() || !me || me.kind !== 'customer') {
+      window.location.href = me && Auth.getToken() ? 'dashboard.html' : 'index.html';
+      return;
+    }
+
+    document.getElementById('portalCompany').textContent = me.companyName;
+    document.getElementById('portalWho').textContent = `${esc(me.customerName)} · customer account`;
+    document.getElementById('portalLogoutBtn').addEventListener('click', () => Auth.logout());
+    document.getElementById('portalPwBtn').addEventListener('click', openPortalPassword);
+
+    const content = document.getElementById('page-content');
+    observeContent();
+
+    const TABS = ['Overview', 'Invoices', 'Outstanding', 'Statement', 'My details'];
+    const RENDER = {
+      'Overview': renderOverview,
+      'Invoices': renderInvoices,
+      'Outstanding': renderOutstanding,
+      'Statement': renderStatement,
+      'My details': renderDetails
+    };
+
+    buildTabBar(document.getElementById('portalTabs'), TABS, 'Overview', (tab) => run(RENDER[tab]));
+
+    // If the granted access window is nearly up, say so before they discover it
+    // by being locked out on a Monday morning.
+    (async function warnAboutExpiry() {
+      try {
+        const profile = await api('/portal/me');
+        const a = profile.access || {};
+        if (!a.expiresAt || a.daysRemaining === null || a.daysRemaining > 14) return;
+        const urgent = a.daysRemaining <= 3;
+        const when = a.daysRemaining === 0
+          ? 'today'
+          : `in ${a.daysRemaining} day${a.daysRemaining === 1 ? '' : 's'}, on ${fmtDate(a.expiresAt)}`;
+        document.getElementById('accessBanner').innerHTML =
+          `<div class="access-banner${urgent ? ' urgent' : ''}">
+             Your access to this portal ends <b>${when}</b>.
+             Contact ${esc(profile.companyName)}${profile.companyEmail ? ` at ${profile.companyEmail}` : ''} to renew it.
+           </div>`;
+      } catch (e) { /* the banner is a courtesy - never block the page on it */ }
+    })();
+
+    async function run(fn) {
+      content.innerHTML = `<div class="card">${skeletonRows(5, 4)}</div>`;
+      try {
+        await fn();
+      } catch (e) {
+        content.innerHTML = `<div class="card"><p class="error-text" style="display:block;">${esc(e.message)}</p></div>`;
+        toast(e.message, 'error');
+      }
+    }
+
+    // ---------------- Overview ----------------
+    async function renderOverview() {
+      const s = await api('/portal/summary');
+      const ageingRows = Object.entries(s.ageing).map(([bucket, amount]) => ({ Bucket: bucket, Amount: fmtMoney(amount) }));
+
+      content.innerHTML = `
+        <div class="portal-hero">
+          <div class="muted" style="font-size:0.82rem;">Amount currently outstanding</div>
+          <div class="amount" id="heroAmount">${fmtMoney(0)}</div>
+          <div class="muted" style="margin-top:6px;font-size:0.84rem;">
+            ${s.openDocumentCount} open invoice${s.openDocumentCount === 1 ? '' : 's'}${
+              s.overdue > 0 ? ` · <span style="color:var(--danger);font-weight:600;">${fmtMoney(s.overdue)} overdue</span>` : ' · nothing overdue'
+            }
+          </div>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="kpi-card"><div class="label">Total billed</div><div class="value" data-count="${s.totalBilled}"></div></div>
+          <div class="kpi-card"><div class="label">Total paid</div><div class="value" data-count="${s.totalPaid}"></div></div>
+          <div class="kpi-card"><div class="label">Credit notes</div><div class="value" data-count="${s.creditNotes}"></div></div>
+          <div class="kpi-card"><div class="label">Invoices raised</div><div class="value" data-count="${s.invoiceCount}" data-plain="1"></div></div>
+        </div>
+
+        <div class="card">
+          <h2>Ageing of what is open</h2>
+          ${ageingRows.length
+            ? renderTable(ageingRows, [{ key: 'Bucket', label: 'Age' }, { key: 'Amount', label: 'Amount', align: 'right' }])
+            : '<p class="muted">Nothing outstanding. Your account is fully settled.</p>'}
+        </div>
+
+        ${s.creditLimit > 0 ? `
+        <div class="card">
+          <h2>Credit limit</h2>
+          <div style="display:flex;align-items:center;gap:22px;flex-wrap:wrap;">
+            ${radialProgressSvg(s.creditUsedPercent, { label: 'used' })}
+            <div>
+              <div class="muted" style="font-size:0.84rem;">Limit</div>
+              <div style="font-size:1.2rem;font-weight:650;">${fmtMoney(s.creditLimit)}</div>
+              <div class="muted" style="font-size:0.84rem;margin-top:10px;">Still available</div>
+              <div style="font-size:1.2rem;font-weight:650;color:var(--success);">${fmtMoney(s.creditAvailable)}</div>
+            </div>
+          </div>
+        </div>` : ''}`;
+
+      animateCounter(document.getElementById('heroAmount'), s.outstanding, (v) => fmtMoney(v), 1000);
+      content.querySelectorAll('[data-count]').forEach(node => {
+        const target = Number(node.dataset.count);
+        animateCounter(node, target, node.dataset.plain ? undefined : (v) => fmtMoney(v));
+      });
+      animateRadialProgress(content);
+      attachHoverEffects();
+    }
+
+    // ---------------- Invoices ----------------
+    let invoicePage = 1;
+    async function renderInvoices() {
+      const res = await api('/portal/invoices', { params: { page: invoicePage } });
+      const rows = rowsOf(res);
+      content.innerHTML = `
+        <div class="card">
+          <h2>My invoices</h2>
+          ${renderTable(rows, [
+            { key: 'InvoiceNo', label: 'Invoice #' },
+            { key: 'InvoiceDate', label: 'Date', render: (r) => fmtDate(r.InvoiceDate) },
+            { key: 'BranchName', label: 'Branch' },
+            { key: 'NetAmount', label: 'Amount', align: 'right', render: (r) => fmtMoney(r.NetAmount) },
+            { key: 'Paid', label: 'Paid', align: 'right', render: (r) => fmtMoney(r.Paid) },
+            { key: 'OpenAmount', label: 'Due', align: 'right', render: (r) => fmtMoney(r.OpenAmount) },
+            { key: 'PaymentStatus', label: 'Status', render: (r) => `<span class="pill ${r.PaymentStatus === 'Paid' ? 'ok' : (r.PaymentStatus === 'Cancelled' ? '' : 'warn')}">${esc(r.PaymentStatus)}</span>` },
+            { key: 'InvoiceID', label: '', render: (r) => `<button class="btn secondary" data-invoice="${esc(r.InvoiceID)}">View</button>` }
+          ], 'No invoices have been raised against your account yet.')}
+          <div id="invoicePager"></div>
+        </div>`;
+      renderPager(document.getElementById('invoicePager'), res, (p) => { invoicePage = p; run(renderInvoices); });
+      content.querySelectorAll('[data-invoice]').forEach(b =>
+        b.addEventListener('click', () => openInvoice(b.dataset.invoice)));
+    }
+
+    async function openInvoice(id) {
+      const d = await api(`/portal/invoices/${id}`);
+      const modal = openModal(`Invoice ${esc(d.header.InvoiceNo)}`, `
+        <p class="muted" style="margin-top:0;">
+          ${fmtDate(d.header.InvoiceDate)} · ${esc(d.header.BranchName)}
+          ${d.header.Status === 'Cancelled' ? ' · <span style="color:var(--danger);font-weight:600;">Cancelled</span>' : ''}
+        </p>
+        ${renderTable(d.lines, [
+          { key: 'ItemName', label: 'Item' },
+          { key: 'HSN', label: 'HSN' },
+          { key: 'Qty', label: 'Qty', align: 'right' },
+          { key: 'Rate', label: 'Rate', align: 'right', render: (r) => fmtMoney(r.Rate) },
+          { key: 'GST', label: 'GST', align: 'right', render: (r) => fmtMoney(r.GST) },
+          { key: 'Amount', label: 'Amount', align: 'right', render: (r) => fmtMoney(r.Amount) }
+        ])}
+        <div style="text-align:right;margin-top:12px;line-height:1.9;">
+          <div class="muted">Taxable ${fmtMoney(d.header.Total)} · GST ${fmtMoney(d.header.GST)}</div>
+          <div style="font-size:1.15rem;font-weight:650;">Invoice total ${fmtMoney(d.header.NetAmount)}</div>
+          <div class="muted">Paid ${fmtMoney(d.paid)}</div>
+          <div style="font-weight:650;color:${d.openAmount > 0 ? 'var(--danger)' : 'var(--success)'};">Still due ${fmtMoney(d.openAmount)}</div>
+        </div>
+        ${d.payments.length ? `<h3 style="margin-top:18px;">Payments received</h3>${renderTable(d.payments, [
+          { key: 'AllocDate', label: 'Date', render: (r) => fmtDate(r.AllocDate) },
+          { key: 'Narration', label: 'Reference' },
+          { key: 'Amount', label: 'Amount', align: 'right', render: (r) => fmtMoney(r.Amount) }
+        ])}` : ''}
+        <div style="margin-top:16px;"><button class="btn secondary" id="invClose">Close</button></div>`);
+      modal.querySelector('#invClose').addEventListener('click', closeModal);
+      animateTables(modal);
+    }
+
+    // ---------------- Outstanding ----------------
+    async function renderOutstanding() {
+      const d = await api('/portal/outstanding');
+      content.innerHTML = `
+        <div class="card">
+          <h2>What is still open</h2>
+          <p class="muted">As on ${fmtDate(d.asOn)} · total ${fmtMoney(d.total)}${d.overdueTotal > 0 ? ` · <span style="color:var(--danger);">overdue ${fmtMoney(d.overdueTotal)}</span>` : ''}</p>
+          ${renderTable(d.rows, [
+            { key: 'DocNo', label: 'Invoice #' },
+            { key: 'DocDate', label: 'Date', render: (r) => fmtDate(r.DocDate) },
+            { key: 'DueDate', label: 'Due', render: (r) => fmtDate(r.DueDate) },
+            { key: 'AgeDays', label: 'Age (days)', align: 'right' },
+            { key: 'Bucket', label: 'Bucket' },
+            { key: 'OpenAmount', label: 'Open', align: 'right', render: (r) => `<span style="color:${r.Overdue ? 'var(--danger)' : 'inherit'};font-weight:600;">${fmtMoney(r.OpenAmount)}</span>` }
+          ], 'Nothing is outstanding. Thank you.')}
+        </div>`;
+    }
+
+    // ---------------- Statement ----------------
+    async function renderStatement() {
+      const today = new Date().toISOString().slice(0, 10);
+      const yearAgo = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+      content.innerHTML = `
+        <div class="card">
+          <h2>Statement of account</h2>
+          <div class="filter-bar">
+            <div><label>From</label><input type="date" id="stFrom" value="${yearAgo}" /></div>
+            <div><label>To</label><input type="date" id="stTo" value="${today}" /></div>
+            <button class="btn" id="stRun">Show</button>
+            <button class="btn secondary" id="stCsv">Download CSV</button>
+          </div>
+          <div id="stBody"></div>
+        </div>`;
+
+      const body = document.getElementById('stBody');
+      const load = async () => {
+        body.innerHTML = skeletonRows(4, 5);
+        const from = document.getElementById('stFrom').value;
+        const to = document.getElementById('stTo').value;
+        const d = await api('/portal/statement', { params: { from, to } });
+        body.innerHTML = `
+          <p class="muted">Opening balance ${fmtMoney(d.openingBalance)}</p>
+          ${renderTable(d.rows, [
+            { key: 'Date', label: 'Date', render: (r) => fmtDate(r.Date) },
+            { key: 'Type', label: 'Type' },
+            { key: 'Reference', label: 'Reference' },
+            { key: 'Branch', label: 'Branch' },
+            { key: 'Debit', label: 'Debit', align: 'right', render: (r) => (r.Debit ? fmtMoney(r.Debit) : '') },
+            { key: 'Credit', label: 'Credit', align: 'right', render: (r) => (r.Credit ? fmtMoney(r.Credit) : '') },
+            { key: 'Balance', label: 'Balance', align: 'right', render: (r) => fmtMoney(r.Balance) }
+          ], 'No activity in this period.')}
+          <p style="text-align:right;font-weight:650;margin-top:10px;">
+            Closing balance ${fmtMoney(d.totals.closingBalance)}
+          </p>`;
+        animateTables(body);
+      };
+
+      document.getElementById('stRun').addEventListener('click', load);
+      document.getElementById('stCsv').addEventListener('click', async () => {
+        try {
+          await apiDownload('/portal/statement/export.csv', {
+            from: document.getElementById('stFrom').value,
+            to: document.getElementById('stTo').value
+          }, `statement-${today}.csv`);
+        } catch (e) { toast(e.message, 'error'); }
+      });
+      await load();
+    }
+
+    // ---------------- My details ----------------
+    async function renderDetails() {
+      const c = await api('/portal/me');
+      const row = (label, value) => value
+        ? `<div class="setting-row"><div class="label">${label}</div><div style="margin-top:4px;">${value}</div></div>` : '';
+      content.innerHTML = `
+        <div class="card">
+          <h2>My details</h2>
+          ${row('Account name', c.customerName)}
+          ${row('Email', c.email)}
+          ${row('Mobile', c.mobile)}
+          ${row('GSTIN', c.gstin)}
+          ${row('Address', [c.address, c.state].filter(Boolean).join(', '))}
+          ${row('Credit limit', c.creditLimit ? fmtMoney(c.creditLimit) : 'Not set')}
+          ${row('Payment terms', c.creditDays ? `${c.creditDays} days` : 'Due on receipt')}
+          <p class="muted" style="margin-top:14px;">
+            These details are maintained by ${esc(c.companyName)}. If anything is wrong,
+            contact them${c.companyEmail ? ` at ${c.companyEmail}` : ''}${c.companyPhone ? ` or on ${c.companyPhone}` : ''}.
+          </p>
+        </div>`;
+    }
+
+    // ---------------- Change portal password ----------------
+    function openPortalPassword() {
+      const modal = openModal('Change your password', `
+        <label>Current password *</label>
+        <input type="password" id="ppCurrent" autocomplete="current-password" />
+        <label style="margin-top:10px;display:block;">New password *</label>
+        <input type="password" id="ppNew" autocomplete="new-password" placeholder="At least 8 characters" />
+        <label style="margin-top:10px;display:block;">Confirm new password *</label>
+        <input type="password" id="ppConfirm" autocomplete="new-password" />
+        <div id="ppError" class="error-text" style="display:none;"></div>
+        <div style="display:flex;gap:8px;margin-top:16px;">
+          <button class="btn" id="ppSave" data-loading-text="Saving…">Change password</button>
+          <button class="btn secondary" id="ppCancel">Cancel</button>
+        </div>`);
+      modal.querySelector('#ppCancel').addEventListener('click', closeModal);
+      const save = modal.querySelector('#ppSave');
+      save.addEventListener('click', withLoading(save, async () => {
+        const errBox = modal.querySelector('#ppError');
+        errBox.style.display = 'none';
+        const fail = (m) => { errBox.textContent = m; errBox.style.display = 'block'; };
+        const current = modal.querySelector('#ppCurrent').value;
+        const next = modal.querySelector('#ppNew').value;
+        const confirm = modal.querySelector('#ppConfirm').value;
+        if (!current || !next) return fail('Fill in both your current and new password.');
+        if (next !== confirm) return fail('The two new passwords do not match.');
+        if (next.length < 8) return fail('The new password must be at least 8 characters.');
+        try {
+          await api('/portal/change-password', { method: 'POST', body: { currentPassword: current, newPassword: next } });
+          closeModal();
+          toast('Password changed.', 'success');
+          showSuccessBurst('Password changed');
+        } catch (e) { fail(e.message); }
+      }));
+    }
+
+    await run(renderOverview);
+    hideSplash();
+  })();
+  </script>
+</body>
+</html>
